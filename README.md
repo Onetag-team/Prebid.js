@@ -4,7 +4,7 @@
 
 # Prebid.js
 
-> A free and open source library for publishers to quickly implement header bidding.
+> A free and open source library for publishers to quickly implement header bidding. 
 
 This README is for developers who want to contribute to Prebid.js.
 Additional documentation can be found at [the Prebid homepage](http://prebid.org).
