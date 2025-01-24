@@ -173,7 +173,7 @@ function interpretResponse(serverResponse, bidderRequest) {
       dealId: bid.dealId == null ? bid.dealId : '',
       currency: bid.currency,
       netRevenue: bid.netRevenue || false,
-      mediaType: bid.mediaType,
+      mediaType: (bid.mediaType === NATIVE+NATIVE_SUFFIX) ? NATIVE : bid.mediaType,
       meta: {
         mediaType: bid.mediaType,
         advertiserDomains: bid.adomain
@@ -201,7 +201,7 @@ function interpretResponse(serverResponse, bidderRequest) {
         }
       }
     }
-    else if (bid.mediaType === NATIVE){
+    else if (bid.mediaType === NATIVE || bid.mediaType === NATIVE + NATIVE_SUFFIX){
       responseBid.native = bid.native;
     }
     bids.push(responseBid);
