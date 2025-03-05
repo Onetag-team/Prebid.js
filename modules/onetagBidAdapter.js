@@ -17,7 +17,7 @@ const ENDPOINT = 'https://onetag-sys.com/prebid-request';
 const USER_SYNC_ENDPOINT = 'https://onetag-sys.com/usync/';
 const BIDDER_CODE = 'onetag';
 const GVLID = 241;
-const NATIVE_SUFFIX = "Ad";
+const NATIVE_SUFFIX = 'Ad';
 
 const storage = getStorageManager({ bidderCode: BIDDER_CODE });
 
@@ -41,15 +41,12 @@ export function hasTypeVideo(bid) {
 export function isValid(type, bid) {
   if (type === BANNER) {
     return parseSizes(bid).length > 0;
-  } 
-  else if (type === VIDEO && hasTypeVideo(bid)) {
+  } else if (type === VIDEO && hasTypeVideo(bid)) {
     const context = bid.mediaTypes.video.context;
     if (context === 'outstream' || context === 'instream') {
       return parseVideoSize(bid).length > 0;
     }
-  }
-  else if(type === NATIVE){
-
+  } else if (type === NATIVE) {
     const assets = bid.mediaTypes.native.ortb.assets;
     const eventTrackers = bid.mediaTypes.native.ortb.eventtrackers;
 
@@ -60,44 +57,33 @@ export function isValid(type, bid) {
       isValidAssets = true;
     }
 
-    if (eventTrackers.length > 0){
-      if (eventTrackers.every(eventTracker => isValidEventTracker(eventTracker))){
+    if (eventTrackers.length > 0) {
+      if (eventTrackers.every(eventTracker => isValidEventTracker(eventTracker))) {
         isValidEventTrackers = true;
       }
-    }
-    else{
+    } else {
       isValidEventTrackers = true;
     }
-    
     return isValidAssets && isValidEventTrackers;
   }
   return false;
 }
 
-const isValidEventTracker = function(eventTracker){
-
-  if (!eventTracker.event || !eventTracker.methods)
+const isValidEventTracker = function(eventTracker) {
+  if (!eventTracker.event || !eventTracker.methods) {
     return false;
-  
+  }
   return true;
 }
 
-const isValidAsset = function(asset){
-  
+const isValidAsset = function(asset) {
   if (!asset.id) return false;
-  
   const hasValidContent = asset.title || asset.img || asset.data || asset.video;
-  
   if (!hasValidContent) return false;
-
   if (asset.title && !asset.title.len) return false;
-
-  if (asset.img && (!asset.img.wmin || !asset.img.hmin)) return false;    // these are recommended
-
+  if (asset.img && (!asset.img.wmin || !asset.img.hmin)) return false; // these are recommended
   if (asset.data && !asset.data.type) return false;
-
   if (asset.video && (!asset.video.mimes || !asset.video.minduration || !asset.video.maxduration || !asset.video.protocols)) return false;
-
   return true;
 }
 
@@ -173,7 +159,7 @@ function interpretResponse(serverResponse, bidderRequest) {
       dealId: bid.dealId == null ? bid.dealId : '',
       currency: bid.currency,
       netRevenue: bid.netRevenue || false,
-      mediaType: (bid.mediaType === NATIVE+NATIVE_SUFFIX) ? NATIVE : bid.mediaType,
+      mediaType: (bid.mediaType === NATIVE + NATIVE_SUFFIX) ? NATIVE : bid.mediaType,
       meta: {
         mediaType: bid.mediaType,
         advertiserDomains: bid.adomain
@@ -200,8 +186,7 @@ function interpretResponse(serverResponse, bidderRequest) {
           responseBid.renderer = createRenderer({ ...bid, adUnitCode });
         }
       }
-    }
-    else if (bid.mediaType === NATIVE || bid.mediaType === NATIVE + NATIVE_SUFFIX){
+    } else if (bid.mediaType === NATIVE || bid.mediaType === NATIVE + NATIVE_SUFFIX) {
       responseBid.native = bid.native;
     }
     bids.push(responseBid);
