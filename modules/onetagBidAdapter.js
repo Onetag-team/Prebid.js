@@ -47,21 +47,23 @@ export function isValid(type, bid) {
       return parseVideoSize(bid).length > 0;
     }
   } else if (type === NATIVE) {
-    const assets = bid.mediaTypes.native.ortb.assets;
-    const eventTrackers = bid.mediaTypes.native.ortb.eventtrackers;
+    if (typeof bid.mediaTypes.native !== 'object' || bid.mediaTypes.native === null) return false;
+
+    const assets = bid.mediaTypes.native?.ortb.assets;
+    const eventTrackers = bid.mediaTypes.native?.ortb.eventtrackers;
 
     let isValidAssets = false;
     let isValidEventTrackers = false;
 
-    if (assets.length > 0 && assets.every(asset => isValidAsset(asset))) {
+    if (assets && Array.isArray(assets) && assets.length > 0 && assets.every(asset => isValidAsset(asset))) {
       isValidAssets = true;
     }
 
-    if (eventTrackers.length > 0) {
+    if (eventTrackers && Array.isArray(eventTrackers) && eventTrackers.length > 0) {
       if (eventTrackers.every(eventTracker => isValidEventTracker(eventTracker))) {
         isValidEventTrackers = true;
       }
-    } else {
+    } else if (!eventTrackers) {
       isValidEventTrackers = true;
     }
     return isValidAssets && isValidEventTrackers;
@@ -69,8 +71,8 @@ export function isValid(type, bid) {
   return false;
 }
 
-const isValidEventTracker = function(eventTracker) {
-  if (!eventTracker.event || !eventTracker.methods) {
+const isValidEventTracker = function(et) {
+  if (!et.event || !et.methods || !Number.isInteger(et.event) || !Array.isArray(et.methods) || !et.methods.length > 0) {
     return false;
   }
   return true;
@@ -90,7 +92,8 @@ const isValidAsset = function(asset) {
 /**
  * Make a server request from the list of BidRequests.
  *
- * @param {validBidRequests[]} - an array of bids
+ * @param {Array<Object>} validBidRequests - an array of bids
+ * @param bidderRequest
  * @return ServerRequest Info describing the request to the server.
  */
 function buildRequests(validBidRequests, bidderRequest) {
