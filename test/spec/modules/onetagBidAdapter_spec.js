@@ -7,7 +7,7 @@ import { hasTypeNative } from '../../../modules/onetagBidAdapter.js';
 
 const NATIVE_SUFFIX = 'Ad';
 
-const getFloor = function(params) {
+const getFloor = function (params) {
   let floorPrice = 0.0001;
   switch (params.mediaType) {
     case BANNER:
@@ -26,7 +26,7 @@ const getFloor = function(params) {
       floorPrice = 5.0;
       break;
   }
-  return {currency: params.currency, floor: floorPrice};
+  return { currency: params.currency, floor: floorPrice };
 };
 
 describe('onetag', function () {
@@ -110,7 +110,7 @@ describe('onetag', function () {
       currency: 'EUR',
       schema: {
         delimiter: '|',
-        fields: [ 'mediaType', 'size' ]
+        fields: ['mediaType', 'size']
       },
       values: {
         'native|*': 1.10
@@ -180,7 +180,7 @@ describe('onetag', function () {
       currency: 'EUR',
       schema: {
         delimiter: '|',
-        fields: [ 'mediaType', 'size' ]
+        fields: ['mediaType', 'size']
       },
       values: {
         'native|*': 1.10
@@ -201,7 +201,7 @@ describe('onetag', function () {
       currency: 'EUR',
       schema: {
         delimiter: '|',
-        fields: [ 'mediaType', 'size' ]
+        fields: ['mediaType', 'size']
       },
       values: {
         'banner|300x250': 0.10
@@ -224,7 +224,7 @@ describe('onetag', function () {
       currency: 'EUR',
       schema: {
         delimiter: '|',
-        fields: [ 'mediaType', 'size' ]
+        fields: ['mediaType', 'size']
       },
       values: {
         'video|640x480': 0.10
@@ -246,7 +246,7 @@ describe('onetag', function () {
       currency: 'EUR',
       schema: {
         delimiter: '|',
-        fields: [ 'mediaType', 'size' ]
+        fields: ['mediaType', 'size']
       },
       values: {
         'video|640x480': 0.10
@@ -491,15 +491,15 @@ describe('onetag', function () {
     });
     it('Should contain all keys', function () {
       expect(data).to.be.an('object');
-      expect(data).to.include.all.keys('location', 'referrer', 'stack', 'numIframes', 'sHeight', 'sWidth', 'docHeight', 'wHeight', 'wWidth', 'hLength', 'bids', 'docHidden', 'xOffset', 'yOffset', 'networkConnectionType', 'networkEffectiveConnectionType', 'timing', 'version', 'fledgeEnabled', 'reachedTop', 'isTopAccessible');
+      expect(data).to.include.all.keys('location', 'referrer', 'stack', 'numIframes', 'sHeight', 'sWidth', 'docHeight', 'wHeight', 'wWidth', 'hLength', 'bids', 'docHidden', 'xOffset', 'yOffset', 'networkConnectionType', 'networkEffectiveConnectionType', 'timing', 'version', 'fledgeEnabled', 'isFriendlyContext');
       expect(data.location).to.satisfy(function (value) {
         return value === null || typeof value === 'string';
       });
       expect(data.referrer).to.satisfy(referrer => referrer === null || typeof referrer === 'string');
       expect(data.stack).to.be.an('array');
       expect(data.numIframes).to.be.a('number');
-      expect(data.reachedTop).to.be.a('boolean');
-      expect(data.isTopAccessible).to.be.a('boolean');
+      expect(data.numIframes).to.be.a('number');
+      expect(data.isFriendlyContext).to.be.a('boolean');
       expect(data.sHeight).to.be.a('number');
       expect(data.sWidth).to.be.a('number');
       expect(data.wWidth).to.be.a('number');
@@ -696,7 +696,7 @@ describe('onetag', function () {
                 cids: ['iris_c73g5jq96mwso4d8']
               },
               // the bare minimum are the IDs. These IDs are the ones from the new IAB Content Taxonomy v3
-              segment: [ { id: '687' }, { id: '123' } ]
+              segment: [{ id: '687' }, { id: '123' }]
             }]
           },
           ext: {
@@ -877,8 +877,8 @@ describe('onetag', function () {
         },
         'adrender': 1
       };
-      const responseWithDsa = {...response};
-      responseWithDsa.body.bids.forEach(bid => bid.dsa = {...dsaResponseObj});
+      const responseWithDsa = { ...response };
+      responseWithDsa.body.bids.forEach(bid => bid.dsa = { ...dsaResponseObj });
       const serverResponse = spec.interpretResponse(responseWithDsa, request);
       serverResponse.forEach(bid => expect(bid.meta.dsa).to.deep.equals(dsaResponseObj));
     });
