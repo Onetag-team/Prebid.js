@@ -286,6 +286,8 @@ function getPageInfo(bidderRequest) {
     referrer: deepAccess(bidderRequest, 'refererInfo.ref', null),
     stack: deepAccess(bidderRequest, 'refererInfo.stack', []),
     numIframes: deepAccess(bidderRequest, 'refererInfo.numIframes', 0),
+    reachedTop: deepAccess(bidderRequest, 'refererInfo.reachedTop', false),
+    isTopAccessible: canAccessTopWindow(),
     wWidth: winDimensions.innerWidth,
     wHeight: winDimensions.innerHeight,
     sWidth: winDimensions.screen.width,
@@ -301,6 +303,17 @@ function getPageInfo(bidderRequest) {
       adapter: '1.1.6'
     }
   };
+}
+
+function canAccessTopWindow() {
+  try {
+    if (window.top.location.href) {
+      return true;
+    }
+  } catch (error) {
+    return false;
+  }
+  return false;
 }
 
 function requestsToBids(bidRequests) {
