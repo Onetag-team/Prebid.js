@@ -887,6 +887,32 @@ describe('onetag', function () {
       const serverResponse = spec.interpretResponse(responseWithDsa, request);
       serverResponse.forEach(bid => expect(bid.meta.dsa).to.deep.equals(dsaResponseObj));
     });
+    it('Returns meta onetag field if onetag field is present in response', function () {
+      const onetagResponseObj = { someInternalField: 'value', nested: { n: 1 } };
+      const responseWithOnetag = getBannerVideoNativeResponse();
+      responseWithOnetag.body.bids.forEach(bid => { bid.onetag = { ...onetagResponseObj }; });
+      const serverResponse = spec.interpretResponse(responseWithOnetag, request);
+      expect(serverResponse).to.not.be.empty;
+      serverResponse.forEach(bid => expect(bid.meta.onetag).to.deep.equal(onetagResponseObj));
+    });
+    it('Leaves meta onetag undefined when the field is absent from the response', function () {
+      const interpretedResponse = spec.interpretResponse(getBannerVideoNativeResponse(), request);
+      expect(interpretedResponse).to.not.be.empty;
+      interpretedResponse.forEach(bid => expect(bid.meta.onetag).to.be.undefined);
+    });
+    it('Does not let the onetag passthrough overwrite the documented meta fields', function () {
+      const responseWithOnetag = getBannerVideoNativeResponse();
+      responseWithOnetag.body.bids.forEach(bid => {
+        bid.onetag = { advertiserDomains: ['spoofed.com'], mediaType: 'spoofed' };
+      });
+      const serverResponse = spec.interpretResponse(responseWithOnetag, request);
+      expect(serverResponse).to.not.be.empty;
+      serverResponse.forEach(bid => {
+        expect(bid.meta.advertiserDomains).to.not.deep.equal(['spoofed.com']);
+        expect(bid.meta.mediaType).to.not.equal('spoofed');
+        expect(bid.meta.onetag.advertiserDomains).to.deep.equal(['spoofed.com']);
+      });
+    });
     it('Returns dealId when present in server response', function () {
       const interpretedResponse = spec.interpretResponse(response, request);
       const bannerBid = interpretedResponse.find(bid => bid.requestId === 'banner');

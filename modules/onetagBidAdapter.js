@@ -197,6 +197,12 @@ function interpretResponse(serverResponse, bidderRequest) {
     if (bid.dsa) {
       responseBid.meta.dsa = bid.dsa;
     }
+    // Namespaced passthrough for OneTag-specific fields, so they can be added
+    // server-side without a change here. Nested under its own key so it can never
+    // overwrite the documented `meta` fields that core and publishers rely on.
+    if (bid.onetag) {
+      responseBid.meta.onetag = bid.onetag;
+    }
     if (bid.mediaType === BANNER) {
       responseBid.ad = bid.ad;
     } else if (bid.mediaType === VIDEO) {
@@ -302,7 +308,7 @@ function getPageInfo(bidderRequest) {
     timing: getTiming(),
     version: {
       prebid: '$prebid.version$',
-      adapter: '1.1.9'
+      adapter: '1.1.10'
     }
   };
 }
