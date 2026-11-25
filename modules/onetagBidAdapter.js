@@ -153,7 +153,6 @@ function buildRequests(validBidRequests, bidderRequest) {
   const connection = getConnectionInfo();
   payload.networkConnectionType = connection?.type || null;
   payload.networkEffectiveConnectionType = connection?.effectiveType || null;
-  payload.fledgeEnabled = false;
   return {
     method: 'POST',
     url: ENDPOINT,
@@ -300,7 +299,7 @@ function getPageInfo(bidderRequest) {
     timing: getTiming(),
     version: {
       prebid: '$prebid.version$',
-      adapter: '1.1.9'
+      adapter: '1.1.10'
     }
   };
 }

@@ -508,7 +508,7 @@ describe('onetag', function () {
     });
     it('Should contain all keys', function () {
       expect(data).to.be.an('object');
-      expect(data).to.include.all.keys('location', 'referrer', 'stack', 'numIframes', 'sHeight', 'sWidth', 'docHeight', 'wHeight', 'wWidth', 'hLength', 'bids', 'docHidden', 'xOffset', 'yOffset', 'networkConnectionType', 'networkEffectiveConnectionType', 'timing', 'version', 'fledgeEnabled');
+      expect(data).to.include.all.keys('location', 'referrer', 'stack', 'numIframes', 'sHeight', 'sWidth', 'docHeight', 'wHeight', 'wWidth', 'hLength', 'bids', 'docHidden', 'xOffset', 'yOffset', 'networkConnectionType', 'networkEffectiveConnectionType', 'timing', 'version');
       expect(data.location).to.satisfy(function (value) {
         return value === null || typeof value === 'string';
       });
@@ -526,7 +526,6 @@ describe('onetag', function () {
       expect(data.networkEffectiveConnectionType).to.satisfy(function (value) {
         return value === null || typeof value === 'string';
       });
-      expect(data.fledgeEnabled).to.be.a('boolean');
       expect(data.bids).to.be.an('array');
       expect(data.version).to.have.all.keys('prebid', 'adapter');
       const bids = data['bids'];
@@ -830,19 +829,6 @@ describe('onetag', function () {
       };
       spec.buildRequests([bannerBid], bidderRequest);
       expect(ortb2).to.deep.equal({ site: { domain: 'page.example.com' } });
-    });
-    it('Should send FLEDGE eligibility flag set to false when fledgeEnabled is not defined', function () {
-      const bidderRequest = {
-        'bidderCode': 'onetag',
-        'auctionId': '1d1a030790a475',
-        'bidderRequestId': '22edbae2733bf6',
-        'timeout': 3000,
-      };
-      const serverRequest = spec.buildRequests([bannerBid], bidderRequest);
-      const payload = JSON.parse(serverRequest.data);
-
-      expect(payload.fledgeEnabled).to.exist;
-      expect(payload.fledgeEnabled).to.exist.and.to.equal(false);
     });
   });
   describe('interpretResponse', function () {
