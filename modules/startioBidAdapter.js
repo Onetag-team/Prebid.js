@@ -1,5 +1,6 @@
 import { registerBidder } from '../src/adapters/bidderFactory.js';
 import { BANNER, VIDEO, NATIVE } from '../src/mediaTypes.js';
+import { fetch } from '../src/ajax.js';
 import { logError, isFn, isPlainObject, formatQS } from '../src/utils.js';
 import { ortbConverter } from '../libraries/ortbConverter/converter.js';
 import { ortb25Translator } from '../libraries/ortb2.5Translator/translator.js';
@@ -26,6 +27,11 @@ const converter = ortbConverter({
       imp.bidfloorcur = 'USD';
     }
 
+    const placementId = bidRequest.params?.placementId;
+    if (placementId != null) {
+      imp.tagid = String(placementId);
+    }
+
     return imp;
   },
   request(buildRequest, imps, bidderRequest, context) {
@@ -41,6 +47,7 @@ const converter = ortbConverter({
     }
     request.ext = request.ext || {};
     request.ext.prebid = request.ext.prebid || {};
+    request.ext.prebid.channel = Object.assign({}, request.ext.prebid.channel, { name: 'pbjs', version: '$prebid.version$' });
 
     const ortb = bidderRequest.ortb2;
     request.regs ??= {};
@@ -107,6 +114,10 @@ function isValidBidFloorCurrency(bid) {
   return !bid.ortb2Imp?.bidfloorcur || bid.ortb2Imp.bidfloorcur === 'USD';
 }
 
+function getEndpointUrl(bidRequest) {
+  return bidRequest.params?.testAdsEnabled ? `${ENDPOINT_URL}&testAdsEnabled=true` : ENDPOINT_URL;
+}
+
 export const spec = {
   code: BIDDER_CODE,
   supportedMediaTypes: [VIDEO, BANNER, NATIVE],
@@ -124,7 +135,7 @@ export const spec = {
 
       return {
         method: METHOD,
-        url: ENDPOINT_URL,
+        url: getEndpointUrl(bidRequest),
         options: {
           contentType: 'text/plain',
           withCredentials: true,

@@ -31,13 +31,22 @@ describe('truereachBidAdapterTests', function () {
       sizes: [[300, 250]]
     }];
 
-    const request = spec.buildRequests(bidRequestData, {});
+    const bidderRequest = {
+      ortb2: {
+        device: {
+          ua: 'Mozilla/5.0 (test)'
+        }
+      }
+    };
+
+    const request = spec.buildRequests(bidRequestData, bidderRequest);
     const req_data = request.data;
 
     expect(request.method).to.equal('POST');
     expect(req_data.imp[0].id).to.equal('34ce3f3b15190a');
     expect(req_data.imp[0].banner.w).to.equal(300);
     expect(req_data.imp[0].banner.h).to.equal(250);
+    expect(req_data.device.ua).to.equal('Mozilla/5.0 (test)');
   });
 
   it('validate_response_params', function () {
@@ -98,5 +107,12 @@ describe('truereachBidAdapterTests', function () {
       expect(syncs).to.be.an('array');
       expect(syncs.length).to.equal(0);
     });
+  });
+});
+
+describe('truereachBidAdapter consent IDs', function () {
+  it('declares its Google Additional Consent provider ID', function () {
+    expect(spec.acpId).to.equal(3196);
+    expect(spec.gvlid).to.be.undefined;
   });
 });

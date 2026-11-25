@@ -3,7 +3,19 @@ import { spec } from 'modules/pixfutureBidAdapter.js';
 import { newBidder } from 'src/adapters/bidderFactory.js';
 
 describe('PixFutureAdapter', function () {
-  it('<description of unit or feature being tested>', function () {
+  describe('getUserSyncs', function () {
+    it('includes COPPA in the sync URL when enabled', function () {
+      const [sync] = spec.getUserSyncs({ iframeEnabled: true }, [], null, null, null, true);
+      expect(sync.url).to.include('&coppa=1');
+    });
+
+    it('does not include COPPA in the sync URL when disabled', function () {
+      const [sync] = spec.getUserSyncs({ iframeEnabled: true }, [], null, null, null, false);
+      expect(sync.url).to.not.include('&coppa=1');
+    });
+  });
+
+  describe('adapter', function () {
     const adapter = newBidder(spec);
     describe('inherited functions', function () {
       it('exists and is a function', function () {
@@ -50,7 +62,7 @@ describe('PixFutureAdapter', function () {
 
     // Test of buildRequest method
 
-    describe('Test of buildRequest method', function () {
+    it('buildRequests should include sizes, params and ad unit code', function () {
       const validBidRequests = [{
         'labelAny': ['display'],
         'bidder': 'pixfuture',

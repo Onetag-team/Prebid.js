@@ -38,7 +38,6 @@ export const spec = {
         url: END_POINT,
         data: JSON.stringify(payload.data),
         options: {
-          contentType: 'application/json',
           withCredentials: true,
         },
       });
@@ -47,7 +46,13 @@ export const spec = {
     return serverRequests;
   },
   interpretResponse: (serverResponse) => {
-    const responseJson = serverResponse ? serverResponse.body : {};
+    const responseJson = serverResponse && serverResponse.body;
+    // No-bid responses come back with cpm 0 and no ad/creativeId/currency.
+    // Return no bids instead of an incomplete bid that Prebid rejects.
+    if (!responseJson || !responseJson.ad || !(Number(responseJson.cpm) > 0)) {
+      return [];
+    }
+    const advertiserDomains = responseJson.meta && responseJson.meta.advertiserDomains;
     const bidResponse = {
       ad: responseJson.ad,
       width: Number(responseJson.width),
@@ -61,9 +66,8 @@ export const spec = {
       creativeId: responseJson.creativeId,
       meta: {
         advertiserDomains:
-          Array.isArray(responseJson.meta.advertiserDomains) &&
-          responseJson.meta.advertiserDomains.length > 0
-            ? responseJson.meta.advertiserDomains
+          Array.isArray(advertiserDomains) && advertiserDomains.length > 0
+            ? advertiserDomains
             : [],
       },
     };

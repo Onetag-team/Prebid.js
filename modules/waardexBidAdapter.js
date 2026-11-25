@@ -1,7 +1,7 @@
 import { deepAccess, getBidIdParameter, isArray, logError } from '../src/utils.js';
 import { registerBidder } from '../src/adapters/bidderFactory.js';
 import { BANNER, VIDEO } from '../src/mediaTypes.js';
-import { config } from '../src/config.js';
+import { coppaDataHandler } from '../src/consentHandler.js';
 
 const ENDPOINT = `https://hb.justbidit2.xyz:8843/prebid`;
 const BIDDER_CODE = 'waardex';
@@ -83,7 +83,7 @@ const getCommonBidsData = bidderRequest => {
     };
   }
 
-  payload.coppa = !!config.getConfig('coppa');
+  payload.coppa = (bidderRequest?.ortb2?.regs?.coppa === 1 || coppaDataHandler.getCoppa());
 
   return payload;
 };
@@ -285,6 +285,7 @@ const isBidValid = bid => {
 
 export const spec = {
   code: BIDDER_CODE,
+  gvlid: 1592,
   supportedMediaTypes: [BANNER, VIDEO],
   isBidRequestValid,
   buildRequests,

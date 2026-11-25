@@ -1,9 +1,11 @@
 import {
+  findSlotElementIdByAdId,
   getPageTargeting,
   getPageTargetingKeys, getPageTargetingMap,
   getSlotTargeting,
-  getSlotTargetingKeys, getSlotTargetingMap, setPageTargeting,
-  setSlotTargeting,
+  getSlotTargetingKeys, getSlotTargetingMap, recordSlotTargeting,
+  setPageTargeting,
+  setSlotTargeting, slotHasTargetedAdId, updateSlotTargetingFromMap,
 } from '../../../../src/utils/gptTargeting.js';
 
 describe('gpt targeting shim', () => {
@@ -11,7 +13,7 @@ describe('gpt targeting shim', () => {
   beforeEach(() => {
     mockGam = {};
   });
-  describe('when getConfig/setConfig is defined', () => {
+  describe('using getConfig/setConfig', () => {
     let targetingConfig;
     beforeEach(() => {
       targetingConfig = undefined;
@@ -79,78 +81,79 @@ describe('gpt targeting shim', () => {
         });
       });
     });
-  });
 
-  describe('when getConfig/setConfig is not defined', () => {
-    let pubads, mockSlot;
-    beforeEach(() => {
-      pubads = {};
-      mockGam.pubads = () => pubads;
-      mockSlot = {};
-    });
-
-    it('getPageTargetingKeys calls pubads.getTargetingKeys', () => {
-      pubads.getTargetingKeys = () => ['passthrough'];
-      expect(getPageTargetingKeys(mockGam)).to.eql(['passthrough']);
-    });
-    it('getSlotTargetingKeys calls slot.getTargetingKeys', () => {
-      mockSlot.getTargetingKeys = () => ['passthrough'];
-      expect(getSlotTargetingKeys(mockSlot)).to.eql(['passthrough']);
-    });
-    it('getPageTargeting calls pubads.getTargeting', () => {
-      pubads.getTargeting = (key) => [`passthrough-${key}`];
-      expect(getPageTargeting('k', mockGam)).to.eql(['passthrough-k']);
-    });
-    it('getSlotTargeting calls slot.getTargeting', () => {
-      mockSlot.getTargeting = (key) => [`passthrough-${key}`];
-      expect(getSlotTargeting(mockSlot, 'k')).to.eql(['passthrough-k']);
-    });
-
-    it('setPageTargeting calls pubads.setTargeting', () => {
-      pubads.setTargeting = sinon.stub();
-      setPageTargeting('key', 'value', mockGam);
-      sinon.assert.calledWith(pubads.setTargeting, 'key', 'value');
-    });
-
-    it('setSlotTargeting calls slot.setTargeting', () => {
-      mockSlot.setTargeting = sinon.stub();
-      setSlotTargeting(mockSlot, 'key', 'value');
-      sinon.assert.calledWith(mockSlot.setTargeting, 'key', 'value');
+    it('updateSlotTargetingFromMap calls setConfig with the whole map', () => {
+      updateSlotTargetingFromMap(mockGam, { k1: 'v1', k2: ['v2', 'v3'] });
+      sinon.assert.calledWith(mockGam.setConfig, { targeting: { k1: 'v1', k2: ['v2', 'v3'] } });
     });
 
     Object.entries({
-      getPageTargetingMap: {
-        fn: getPageTargetingMap,
-        arg: () => mockGam,
-        mock: () => pubads
-      },
-      getSlotTargetingMap: {
-        fn: getSlotTargetingMap,
-        arg: () => mockSlot,
-        mock: () => mockSlot
-      }
-    }).forEach(([name, { fn, arg, mock }]) => {
-      describe(name, () => {
-        it('calls getTargeting on each key from getTargetingkeys', () => {
-          Object.assign(mock(), {
-            getTargetingKeys: () => ['k1', 'k2'],
-            getTargeting: (key) => [`${key}value`]
-          });
-          expect(fn(arg())).to.eql({
-            k1: ['k1value'],
-            k2: ['k2value']
-          });
+      getPageTargetingMap,
+      getSlotTargetingMap
+    }).forEach(([name, fn]) => {
+      describe(`${name} normalization`, () => {
+        it('wraps single values in arrays and drops null values', () => {
+          targetingConfig = { single: 'v', multi: ['v1', 'v2'], cleared: null };
+          expect(fn(mockGam)).to.eql({ single: ['v'], multi: ['v1', 'v2'] });
+        });
+        it('treats a null targeting config as empty', () => {
+          targetingConfig = null;
+          expect(fn(mockGam)).to.eql({});
         });
       });
     });
 
-    it('getSlotTargetingMap calls slot.getTargeting on each key from slot.getTargetingKeys', () => {
-      mockSlot.getTargetingKeys = () => ['k1', 'k2'];
-      mockSlot.getTargeting = (key) => [`${key}value`];
-      expect(getSlotTargetingMap(mockSlot)).to.eql({
-        k1: ['k1value'],
-        k2: ['k2value']
+    describe('page-level helpers without an explicit gpt argument', () => {
+      let origGoogletag;
+      beforeEach(() => {
+        origGoogletag = window.googletag;
+        window.googletag = mockGam;
       });
+      afterEach(() => {
+        if (origGoogletag === undefined) {
+          delete window.googletag;
+        } else {
+          window.googletag = origGoogletag;
+        }
+      });
+      it('read from the global googletag', () => {
+        targetingConfig = { key: ['value'] };
+        expect(getPageTargetingKeys()).to.eql(['key']);
+        expect(getPageTargeting('key')).to.eql(['value']);
+        expect(getPageTargetingMap()).to.eql({ key: ['value'] });
+      });
+      it('write to the global googletag', () => {
+        setPageTargeting('key', 'value');
+        sinon.assert.calledWith(mockGam.setConfig, { targeting: { key: 'value' } });
+      });
+    });
+  });
+
+  describe('slot targeting adId cache', () => {
+    it('records provided ad ids and finds the matching slot element id', () => {
+      const slotA = { getSlotElementId: () => 'div-a' };
+      const slotB = { getSlotElementId: () => 'div-b' };
+      recordSlotTargeting(slotA, ['ad-a']);
+      recordSlotTargeting(slotB, ['ad-b']);
+
+      expect(slotHasTargetedAdId(slotA, 'ad-a')).to.equal(true);
+      expect(slotHasTargetedAdId(slotA, 'ad-b')).to.equal(false);
+      expect(findSlotElementIdByAdId('ad-b', () => [slotA, slotB])).to.equal('div-b');
+    });
+
+    it('overwrites previously recorded ad ids for a slot', () => {
+      const slot = { getSlotElementId: () => 'div-1' };
+      recordSlotTargeting(slot, ['old']);
+      recordSlotTargeting(slot, ['new']);
+      expect(slotHasTargetedAdId(slot, 'old')).to.equal(false);
+      expect(slotHasTargetedAdId(slot, 'new')).to.equal(true);
+    });
+
+    it('ignores empty ad ids', () => {
+      const slot = { getSlotElementId: () => 'div-1' };
+      recordSlotTargeting(slot, ['ad-1', '']);
+      expect(slotHasTargetedAdId(slot, 'ad-1')).to.equal(true);
+      expect(slotHasTargetedAdId(slot, '')).to.equal(false);
     });
   });
 });

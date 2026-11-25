@@ -12,6 +12,7 @@ import { ortbConverter } from '../libraries/ortbConverter/converter.js';
 
 // Constants
 const BIDDER_CODE = 'contxtful';
+const ACP_ID = 2963; // Google Additional Consent provider ID
 const BIDDER_ENDPOINT = 'prebid.receptivity.io';
 const MONITORING_ENDPOINT = 'monitoring.receptivity.io';
 const DEFAULT_NET_REVENUE = true;
@@ -134,9 +135,9 @@ const constructUrl = (userSyncsDefault, userSyncServer) => {
 };
 
 // Returns the list of user synchronization objects.
-const getUserSyncs = (syncOptions, serverResponses, gdprConsent, uspConsent, gppConsent) => {
+const getUserSyncs = (syncOptions, serverResponses, gdprConsent, uspConsent, gppConsent, coppa) => {
   // Get User Sync Defaults from pbjs lib
-  const userSyncsDefaultLib = getUserSyncsLib('')(syncOptions, null, gdprConsent, uspConsent, gppConsent);
+  const userSyncsDefaultLib = getUserSyncsLib('')(syncOptions, null, gdprConsent, uspConsent, gppConsent, coppa);
   const userSyncsDefault = userSyncsDefaultLib?.find(item => item.url !== undefined);
 
   // Map Server Responses to User Syncs list
@@ -258,6 +259,7 @@ const logEvent = (eventType, data) => {
 // Bidder public specification
 export const spec = {
   code: BIDDER_CODE,
+  acpId: ACP_ID,
   supportedMediaTypes: [BANNER, VIDEO, NATIVE],
 
   isBidRequestValid,

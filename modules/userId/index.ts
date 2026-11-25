@@ -10,15 +10,7 @@ import adapterManager from '../../src/adapterManager.js';
 import { EVENTS } from '../../src/constants.js';
 import { module, ready as hooksReady } from '../../src/hook.js';
 import { EID_CONFIG, getEids } from './eids.js';
-import {
-  discloseStorageUse,
-  getCoreStorageManager,
-  newStorageManager,
-  STORAGE_TYPE_COOKIES,
-  STORAGE_TYPE_LOCALSTORAGE,
-  type StorageManager,
-  type StorageType
-} from '../../src/storageManager.js';
+import { newStorageManager, type StorageManager, type StorageType } from '../../src/storageManager.js';
 import {
   deepEqual,
   deepSetValue,
@@ -38,7 +30,7 @@ import { getPPID as coreGetPPID } from '../../src/adserver.js';
 import { defer, delay, PbPromise } from '../../src/utils/promise.js';
 import { newMetrics, timedAuctionHook, useMetrics } from '../../src/utils/perfMetrics.js';
 import { findRootDomain } from '../../src/fpd/rootDomain.js';
-import { allConsent, GDPR_GVLIDS } from '../../src/consentHandler.js';
+import { allConsent, GDPR_ACPIDS, GDPR_GVLIDS } from '../../src/consentHandler.js';
 import { MODULE_TYPE_UID } from '../../src/activities/modules.js';
 import { isActivityAllowed, registerActivityControl } from '../../src/activities/rules.js';
 import { ACTIVITY_ACCESS_DEVICE, ACTIVITY_ENRICH_EIDS } from '../../src/activities/activities.js';
@@ -50,6 +42,7 @@ import type {
   IdProviderSpec,
   ProviderParams,
   ProviderResponse,
+  SerializableId,
   UserId,
   UserIdConfig,
   UserIdProvider
@@ -61,21 +54,29 @@ import {
   ACTIVITY_PARAM_STORAGE_WRITE
 } from '../../src/activities/params.js';
 import { beforeInitAuction } from '../../src/auction.js';
+import {
+  canUseStorage,
+  coreStorage,
+  getConfiguredStorageTypes,
+  hasValidStorageTypes,
+  type InvocationHandle,
+  MODULE_NAME,
+  newIdStore,
+  populateEnabledStorageTypes,
+  type IdStore
+} from './storage.ts';
 
 // export so that consumers can `import {type UserIdConfig} from 'prebid.js/modules/userId'`
 export { type UserIdConfig } from './spec.ts';
+export { COOKIE_SUFFIXES, coreStorage, deleteStoredValue, getConsentHash, HTML5_SUFFIXES, setStoredValue } from './storage.ts';
 
-const MODULE_NAME = 'User ID';
-const COOKIE = STORAGE_TYPE_COOKIES;
-const LOCAL_STORAGE = STORAGE_TYPE_LOCALSTORAGE;
 export const PBJS_USER_ID_OPTOUT_NAME = '_pbjs_id_optout';
-export const coreStorage = getCoreStorageManager('userId');
 export const dep = {
   isAllowed: isActivityAllowed
 };
 
 declare module '../../src/userSync' {
-  interface UserSyncConfig {
+  interface UserSyncConfig<P extends string = string> {
     /**
      * EID source to use as PPID for GAM.
      *
@@ -93,7 +94,12 @@ declare module '../../src/userSync' {
     idPriority?: {
       [idName: keyof UserId]: UserIdProvider[]
     }
-    userIds?: (UserIdConfig<keyof ProviderParams> | UserIdConfig<UserIdProvider>)[];
+    // Map each name separately: a union passed to UserIdConfig would mix providers' params.
+    // P is inferred at the setter, so an unknown name doesn't also match a known provider.
+    userIds?: (
+      { [K in keyof ProviderParams]: UserIdConfig<K> }[keyof ProviderParams]
+      | { [K in P]: UserIdConfig<K> }[P]
+    )[];
     // TODO documentation for these is either missing or inscrutable
     encryptedSignalSources?: {
       sources: {
@@ -154,175 +160,35 @@ export function setSubmoduleRegistry(submodules) {
   updateEIDConfig(submodules);
 }
 
-function cookieSetter(submodule, storageMgr?) {
-  storageMgr = storageMgr || submodule.storageMgr;
-  const domainOverride = (typeof submodule.submodule.domainOverride === 'function') ? submodule.submodule.domainOverride() : null;
-  const name = submodule.config.storage.name;
-  return function setCookie(suffix, value, expiration) {
-    storageMgr.setCookie(name + (suffix || ''), value, expiration, 'Lax', domainOverride);
-  };
-}
-
-function setValueInCookie(submodule, valueStr, expiresStr) {
-  const storage = submodule.config.storage;
-  const setCookie = cookieSetter(submodule);
-
-  setCookie(null, valueStr, expiresStr);
-  setCookie('_cst', getConsentHash(), expiresStr);
-  if (typeof storage.refreshInSeconds === 'number') {
-    setCookie('_last', new Date().toUTCString(), expiresStr);
-  }
-}
-
-function setValueInLocalStorage(submodule, valueStr, expiresStr) {
-  const storage = submodule.config.storage;
-  const mgr = submodule.storageMgr;
-
-  mgr.setDataInLocalStorage(`${storage.name}_exp`, expiresStr);
-  mgr.setDataInLocalStorage(`${storage.name}_cst`, getConsentHash());
-  mgr.setDataInLocalStorage(storage.name, encodeURIComponent(valueStr));
-  if (typeof storage.refreshInSeconds === 'number') {
-    mgr.setDataInLocalStorage(`${storage.name}_last`, new Date().toUTCString());
-  }
-}
-
-export function setStoredValue(submodule, value) {
-  const storage = submodule.config.storage;
-
-  try {
-    const expiresStr = (new Date(Date.now() + (storage.expires * (60 * 60 * 24 * 1000)))).toUTCString();
-    const valueStr = isPlainObject(value) ? JSON.stringify(value) : value;
-
-    submodule.enabledStorageTypes.forEach(storageType => {
-      switch (storageType) {
-        case COOKIE:
-          setValueInCookie(submodule, valueStr, expiresStr);
-          break;
-        case LOCAL_STORAGE:
-          setValueInLocalStorage(submodule, valueStr, expiresStr);
-          break;
-      }
-    });
-  } catch (error) {
-    logError(error);
-  }
-}
-
-export const COOKIE_SUFFIXES = ['', '_last', '_cst'];
-
-function deleteValueFromCookie(submodule) {
-  const setCookie = cookieSetter(submodule, coreStorage);
-  const expiry = (new Date(Date.now() - 1000 * 60 * 60 * 24)).toUTCString();
-
-  COOKIE_SUFFIXES.forEach(suffix => {
-    try {
-      setCookie(suffix, '', expiry);
-    } catch (e) {
-      logError(e);
-    }
-  });
-}
-
-export const HTML5_SUFFIXES = ['', '_last', '_exp', '_cst'];
-
-function deleteValueFromLocalStorage(submodule) {
-  HTML5_SUFFIXES.forEach(suffix => {
-    try {
-      coreStorage.removeDataFromLocalStorage(submodule.config.storage.name + suffix);
-    } catch (e) {
-      logError(e);
-    }
-  });
-}
-
-export function deleteStoredValue(submodule) {
-  populateEnabledStorageTypes(submodule);
-
-  submodule.enabledStorageTypes.forEach(storageType => {
-    switch (storageType) {
-      case COOKIE:
-        deleteValueFromCookie(submodule);
-        break;
-      case LOCAL_STORAGE:
-        deleteValueFromLocalStorage(submodule);
-        break;
-    }
-  });
-}
-
-function getValueFromCookie(submodule, storedKey) {
-  return submodule.storageMgr.getCookie(storedKey);
-}
-
-function getValueFromLocalStorage(submodule, storedKey) {
-  const mgr = submodule.storageMgr;
-  const storage = submodule.config.storage;
-  const storedValueExp = mgr.getDataFromLocalStorage(`${storage.name}_exp`);
-
-  // empty string means no expiration set
-  if (storedValueExp === '') {
-    return mgr.getDataFromLocalStorage(storedKey);
-  } else if (storedValueExp && ((new Date(storedValueExp)).getTime() - Date.now() > 0)) {
-    return decodeURIComponent(mgr.getDataFromLocalStorage(storedKey));
-  }
-}
-
-function getStoredValue(submodule, key = undefined) {
-  const storage = submodule.config.storage;
-  const storedKey = key ? `${storage.name}_${key}` : storage.name;
-  let storedValue;
-  try {
-    submodule.enabledStorageTypes.find(storageType => {
-      switch (storageType) {
-        case COOKIE:
-          storedValue = getValueFromCookie(submodule, storedKey);
-          break;
-        case LOCAL_STORAGE:
-          storedValue = getValueFromLocalStorage(submodule, storedKey);
-          break;
-      }
-
-      return !!storedValue;
-    });
-
-    // support storing a string or a stringified object
-    if (typeof storedValue === 'string' && storedValue.trim().charAt(0) === '{') {
-      storedValue = JSON.parse(storedValue);
-    }
-  } catch (e) {
-    logError(e);
-  }
-  return storedValue;
-}
-
-function processSubmoduleCallbacks(submodules, cb, priorityMaps) {
+function processSubmoduleCallbacks(submodules, cb) {
   cb = uidMetrics().fork().startTiming('userId.callbacks.total').stopBefore(cb);
   const done = delayExecution(() => {
     clearTimeout(timeoutID);
     cb();
   }, submodules.length);
   submodules.forEach(function (submodule) {
-    const moduleDone = submoduleMetrics(submodule.submodule.name).startTiming('callback').stopBefore(done);
-    function callbackCompleted(idObj) {
-      // if valid, id data should be saved to cookie/html storage
-      if (idObj) {
-        if (submodule.config.storage) {
-          setStoredValue(submodule, idObj);
+    // set by submodule.store.handle() in populateSubmoduleId (see IdStore.handle in ./storage.ts)
+    const handle: InvocationHandle = submodule.handle;
+    handle.onClose = submoduleMetrics(submodule.submodule.name).startTiming('callback').stopBefore(done);
+    function setId(id?: SerializableId) {
+      if (handle.managed) {
+        handle.setId(id);
+      } else if (id) {
+        try {
+          handle.store(id);
+        } finally {
+          handle.setId(id);
         }
-        // cache decoded value (this is copied to every adUnit bid)
-        submodule.idObj = submodule.submodule.decode(idObj, submodule.config);
-        priorityMaps.refresh();
-        updatePPID(priorityMaps);
       } else {
         logInfo(`${MODULE_NAME}: ${submodule.submodule.name} - request id responded with an empty value`);
+        handle.close();
       }
-      moduleDone();
     }
     try {
-      submodule.callback(callbackCompleted, getStoredValue.bind(null, submodule));
+      submodule.callback(setId, (key?: string) => submodule.store.read(key));
     } catch (e) {
       logError(`Error in userID module '${submodule.submodule.name}':`, e);
-      moduleDone();
+      handle.close();
     }
     // clear callback, this prop is used to test if all submodule callbacks are complete below
     submodule.callback = undefined;
@@ -337,11 +203,19 @@ function getIds(priorityMap): Partial<UserId> {
   );
 }
 
+const warnedNoPrimaryIds = new WeakSet();
+
 function getPrimaryIds(submodule) {
   if (submodule.primaryIds) return submodule.primaryIds;
   const ids = Object.keys(submodule.eids ?? {});
   if (ids.length > 1) {
-    throw new Error(`ID submodule ${submodule.name} can provide multiple IDs, but does not specify 'primaryIds'`);
+    // This runs whenever the priority maps are rebuilt (init, setConfig, every new ID), outside any per-module
+    // error handling: a throw here would break every ID module, not just this one. Treat none of its IDs as primary.
+    if (!warnedNoPrimaryIds.has(submodule)) {
+      warnedNoPrimaryIds.add(submodule);
+      logError(`${MODULE_NAME}: ID submodule ${submodule.name} can provide multiple IDs, but does not specify 'primaryIds'; none of its IDs will be treated as primary`);
+    }
+    return [];
   }
   return ids;
 }
@@ -528,27 +402,71 @@ function idSystemInitializer({ mkDelay = delay } = {}) {
     return allConsent.promise.finally(initMetrics.startTiming('userId.init.consent'));
   }
 
-  let done = cancelAndTry(
-    PbPromise.all([hooksReady, startInit.promise])
-      .then(timeConsent)
-      .then(checkRefs(() => {
-        initialized = true;
-        initSubmodules(initModules, allModules);
-      }))
-      .then(() => startCallbacks.promise.finally(initMetrics.startTiming('userId.callbacks.pending')))
-      .then(checkRefs(() => {
-        const modWithCb = initModules.submodules.filter(item => isFn(item.callback));
-        if (modWithCb.length) {
-          return new PbPromise((resolve) => processSubmoduleCallbacks(modWithCb, resolve, initModules));
-        }
-      }))
-  );
+  // Batches of submodule callbacks that have been discovered but have not finished.
+  // A filtered refresh cancels `done`, but the submodules it did not name may still
+  // be fetching, so its replacement chain waits for them rather than releasing the
+  // auction early. Tracked from discovery rather than from the moment they start,
+  // because with `auctionDelay` = 0 callbacks are held until after the auction ends.
+  const inFlight = new Set<ReturnType<typeof defer<void>>>();
+
+  function trackBatch() {
+    const batch = defer<void>();
+    inFlight.add(batch);
+    return {
+      batch,
+      settle: () => {
+        inFlight.delete(batch);
+        batch.resolve();
+      }
+    };
+  }
+
+  function pendingCallbacks() {
+    return inFlight.size
+      ? PbPromise.all(Array.from(inFlight, (batch) => batch.promise)).then(() => undefined)
+      : null;
+  }
+
+  // An unfiltered refresh replaces everything, including work that may never
+  // finish. Release the markers it supersedes, or a later filtered refresh would
+  // wait on a batch nothing is going to complete.
+  function supersedeAll(except) {
+    Array.from(inFlight).forEach((batch) => {
+      if (batch === except) return;
+      inFlight.delete(batch);
+      batch.resolve();
+    });
+  }
+
+  let settleInitial;
+
+  const initChain = PbPromise.all([hooksReady, startInit.promise])
+    .then(timeConsent)
+    .then(checkRefs(() => {
+      initialized = true;
+      initSubmodules(initModules, allModules);
+      if (initModules.submodules.some(item => isFn(item.callback))) {
+        settleInitial = trackBatch().settle;
+      }
+    }))
+    .then(() => startCallbacks.promise.finally(initMetrics.startTiming('userId.callbacks.pending')))
+    .then(checkRefs(() => {
+      const modWithCb = initModules.submodules.filter(item => isFn(item.callback));
+      if (modWithCb.length) {
+        return new PbPromise((resolve) => processSubmoduleCallbacks(modWithCb, resolve));
+      }
+    }));
+
+  // never let the marker outlive the chain that owns it
+  initChain.then(() => settleInitial?.(), () => settleInitial?.());
+
+  let done = cancelAndTry(initChain);
 
   /**
    * with `ready` = true, starts initialization; with `refresh` = true, reinitialize submodules (optionally
    * filtered by `submoduleNames`).
    */
-  return function ({ refresh = false, submoduleNames = null, ready = false } = {}) {
+  return function ({ refresh = false, submoduleNames = null, ready = false, forceNewModuleRefresh = true } = {}) {
     if (ready && !initStarted) {
       initStarted = true;
       startInit.resolve();
@@ -564,23 +482,41 @@ function idSystemInitializer({ mkDelay = delay } = {}) {
       }
     }
     if (refresh && initialized) {
+      // Captured before the refresh adds a batch of its own. An unfiltered refresh
+      // supersedes everything, so it keeps escaping a stuck initialization; a
+      // filtered one must not shorten the wait for what it left running.
+      // A filtered refresh waits for what it leaves running; an unfiltered one
+      // supersedes it, but only once the replacement is installed below.
+      const priorCallbacks = submoduleNames == null ? null : pendingCallbacks();
+      // Registered now, not when the chain gets there: a second refresh issued
+      // before this one has run must still see this batch as outstanding.
+      const refreshBatch = trackBatch();
+      const settleRefresh = refreshBatch.settle;
+      const chain = done
+        .catch(() => null)
+        .then(timeConsent) // fetch again in case a refresh was forced before this was resolved
+        .then(checkRefs(() => {
+          const cbModules = initSubmodules(
+            initModules,
+            allModules.filter((sm) => submoduleNames == null || submoduleNames.includes(sm.submodule.name)),
+            true,
+            forceNewModuleRefresh
+          ).filter((sm) => {
+            return sm.callback != null;
+          });
+          if (cbModules.length) {
+            return new PbPromise((resolve) => processSubmoduleCallbacks(cbModules, resolve));
+          }
+        }));
+      chain.then(settleRefresh, settleRefresh);
       done = cancelAndTry(
-        done
-          .catch(() => null)
-          .then(timeConsent) // fetch again in case a refresh was forced before this was resolved
-          .then(checkRefs(() => {
-            const cbModules = initSubmodules(
-              initModules,
-              allModules.filter((sm) => submoduleNames == null || submoduleNames.includes(sm.submodule.name)),
-              true
-            ).filter((sm) => {
-              return sm.callback != null;
-            });
-            if (cbModules.length) {
-              return new PbPromise((resolve) => processSubmoduleCallbacks(cbModules, resolve, initModules));
-            }
-          }))
+        priorCallbacks == null ? chain : PbPromise.all([priorCallbacks, chain]).then(() => undefined)
       );
+      if (submoduleNames == null) {
+        // After the swap, never before: releasing these first can fulfil the chain
+        // this refresh just replaced, and a caller can take it for the current one.
+        supersedeAll(refreshBatch.batch);
+      }
     }
     return done;
   };
@@ -593,10 +529,13 @@ function getPPID(eids = getUserIdsAsEids() || []) {
   const matchingUserId = ppidSource && eids.find(userID => userID.source === ppidSource);
   if (matchingUserId && typeof matchingUserId?.uids?.[0]?.id === 'string') {
     const ppidValue = matchingUserId.uids[0].id.replace(/[\W_]/g, '');
-    if (ppidValue.length >= 32 && ppidValue.length <= 150) {
+    // Regex copied from https://support.google.com/admanager/answer/2880055?hl=en#requirements,
+    // and removed the uncessary escape character inside the character class
+    const regex = /^[0-9a-zA-Z+.=/_\-$,{}]{22,150}$/;
+    if (regex.test(ppidValue)) {
       return ppidValue;
     } else {
-      logWarn(`User ID - Googletag Publisher Provided ID for ${ppidSource} is not between 32 and 150 characters - ${ppidValue}`);
+      logWarn(`User ID - Googletag Publisher Provided ID for ${ppidSource} doesn't match the PPID requirements - ${ppidValue}`);
     }
   }
 }
@@ -825,74 +764,62 @@ function getUserIdsAsync(): Promise<Partial<UserId>> {
   return retryOnCancel();
 }
 
-export function getConsentHash() {
-  // transform decimal string into base64 to save some space on cookies
-  let hash = Number(allConsent.hash);
-  const bytes = [];
-  while (hash > 0) {
-    bytes.push(String.fromCharCode(hash & 255));
-    hash = hash >>> 8;
-  }
-  return btoa(bytes.join(''));
-}
-
-function consentChanged(submodule) {
-  const storedConsent = getStoredValue(submodule, 'cst');
-  return !storedConsent || storedConsent !== getConsentHash();
-}
-
-function populateSubmoduleId(submodule: SubmoduleContainer<UserIdProvider>, forceRefresh) {
+function populateSubmoduleId(submodule: SubmoduleContainer<UserIdProvider>, priorityMaps, forceRefresh) {
   const consentData = allConsent.getConsentData();
 
-  // There are two submodule configuration types to handle: storage or value
+  // There are three submodule configuration types to handle:
   // 1. storage: retrieve user id data from cookie/html storage or with the submodule's getId method
   // 2. value: pass directly to bids
-  if (submodule.config.storage) {
-    let storedId = getStoredValue(submodule);
-    let response;
-
-    let refreshNeeded = false;
-    if (typeof submodule.config.storage.refreshInSeconds === 'number') {
-      const storedDate = new Date(getStoredValue(submodule, 'last'));
-      refreshNeeded = storedDate && (Date.now() - storedDate.getTime() > submodule.config.storage.refreshInSeconds * 1000);
+  // 3. neither: call getId on every page view
+  // a callback left by an earlier invocation is superseded, whether or not this one returns its own
+  submodule.callback = undefined;
+  if (submodule.config.value && !submodule.config.storage) {
+    submodule.idObj = submodule.config.value;
+    return;
+  }
+  // store.handle() also records the new handle as submodule.handle
+  const handle = submodule.store.handle({
+    isCurrent: () => priorityMaps === initializedSubmodules,
+    onChange: () => {
+      priorityMaps.refresh();
+      updatePPID(priorityMaps);
     }
-
-    if (!storedId || refreshNeeded || forceRefresh || consentChanged(submodule)) {
+  });
+  let storedId;
+  let response;
+  if (submodule.config.storage) {
+    storedId = submodule.store.read();
+    if (!storedId || forceRefresh || submodule.store.needsRefresh()) {
       const extendedConfig = Object.assign({ enabledStorageTypes: submodule.enabledStorageTypes }, submodule.config);
 
       // No id previously saved, or a refresh is needed, or consent has changed. Request a new id from the submodule.
-      response = submodule.submodule.getId(extendedConfig, consentData, storedId);
+      response = submodule.submodule.getId(extendedConfig, consentData, storedId, handle.view);
     } else if (typeof submodule.submodule.extendId === 'function') {
       // If the id exists already, give submodule a chance to decide additional actions that need to be taken
-      response = submodule.submodule.extendId(submodule.config, consentData, storedId);
+      response = submodule.submodule.extendId(submodule.config, consentData, storedId, handle.view);
     }
+  } else {
+    response = submodule.submodule.getId(submodule.config, consentData, undefined, handle.view);
+  }
 
-    if (isPlainObject(response)) {
-      if (response.id) {
-        // A getId/extendId result assumed to be valid user id data, which should be saved to users local storage or cookies
-        setStoredValue(submodule, response.id);
-        storedId = response.id;
-      }
-
-      if (typeof response.callback === 'function') {
-        // Save async callback to be invoked after auction
-        submodule.callback = response.callback as any;
-      }
+  const id = isPlainObject(response) ? response.id : undefined;
+  const callback = isPlainObject(response) && typeof response.callback === 'function' ? response.callback : undefined;
+  if (handle.managed) {
+    submodule.idObj = id ? submodule.submodule.decode(id, submodule.config) : undefined;
+  } else {
+    if (id) {
+      // A getId/extendId result assumed to be valid user id data, which should be saved to users local storage or cookies
+      handle.store(id);
+      storedId = id;
     }
-
     if (storedId) {
       // cache decoded value (this is copied to every adUnit bid)
       submodule.idObj = submodule.submodule.decode(storedId, submodule.config);
     }
-  } else if (submodule.config.value) {
-    // cache decoded value (this is copied to every adUnit bid)
-    submodule.idObj = submodule.config.value;
-  } else {
-    const response = submodule.submodule.getId(submodule.config, consentData);
-    if (isPlainObject(response)) {
-      if (typeof response.callback === 'function') { submodule.callback = response.callback; }
-      if (response.id) { submodule.idObj = submodule.submodule.decode(response.id, submodule.config); }
-    }
+  }
+  submodule.callback = callback;
+  if (!callback) {
+    handle.close();
   }
 }
 
@@ -926,7 +853,7 @@ function hasOptedOut() {
   return false;
 }
 
-function initSubmodules(priorityMaps, submodules, forceRefresh = false) {
+function initSubmodules(priorityMaps, submodules, forceRefresh = false, forceNewModuleRefresh = forceRefresh) {
   return uidMetrics().fork().measureTime('userId.init.modules', function () {
     if (hasOptedOut()) {
       priorityMaps.reset();
@@ -954,7 +881,7 @@ function initSubmodules(priorityMaps, submodules, forceRefresh = false) {
     const initialized = submodules.reduce((carry, submodule) => {
       return submoduleMetrics(submodule.submodule.name).measureTime('init', () => {
         try {
-          populateSubmoduleId(submodule, forceRefresh);
+          populateSubmoduleId(submodule, priorityMaps, submodule.new ? forceNewModuleRefresh : forceRefresh);
           carry.push(submodule);
         } catch (e) {
           logError(`Error in userID module '${submodule.submodule.name}':`, e);
@@ -966,16 +893,6 @@ function initSubmodules(priorityMaps, submodules, forceRefresh = false) {
     updatePPID(priorityMaps);
     return initialized;
   });
-}
-
-function getConfiguredStorageTypes(config) {
-  return config?.storage?.type?.trim().split(/\s*&\s*/) || [];
-}
-
-function hasValidStorageTypes(config) {
-  const storageTypes = getConfiguredStorageTypes(config);
-
-  return storageTypes.every(storageType => ALL_STORAGE_TYPES.has(storageType));
 }
 
 /**
@@ -1019,63 +936,6 @@ export function getValidSubmoduleConfigs(configRegistry) {
   });
 }
 
-const ALL_STORAGE_TYPES = new Set([LOCAL_STORAGE, COOKIE]);
-
-function canUseLocalStorage(submodule) {
-  if (!submodule.storageMgr.localStorageIsEnabled()) {
-    return false;
-  }
-  return true;
-}
-
-function canUseCookies(submodule) {
-  if (!submodule.storageMgr.cookiesAreEnabled()) {
-    return false;
-  }
-  return true;
-}
-
-const STORAGE_PURPOSES = [1, 2, 3, 4, 7];
-
-function populateEnabledStorageTypes(submodule: SubmoduleContainer<UserIdProvider>) {
-  if (submodule.enabledStorageTypes) {
-    return;
-  }
-
-  const storageTypes = getConfiguredStorageTypes(submodule.config);
-
-  submodule.enabledStorageTypes = storageTypes.filter(type => {
-    switch (type) {
-      case LOCAL_STORAGE:
-        HTML5_SUFFIXES.forEach(suffix => {
-          discloseStorageUse('userId', {
-            type: 'web',
-            identifier: submodule.config.storage.name + suffix,
-            purposes: STORAGE_PURPOSES
-          });
-        });
-        return canUseLocalStorage(submodule);
-      case COOKIE:
-        COOKIE_SUFFIXES.forEach(suffix => {
-          discloseStorageUse('userId', {
-            type: 'cookie',
-            identifier: submodule.config.storage.name + suffix,
-            purposes: STORAGE_PURPOSES,
-            maxAgeSeconds: (submodule.config.storage.expires ?? 0) * 24 * 60 * 60,
-            cookieRefresh: true
-          });
-        });
-        return canUseCookies(submodule);
-    }
-
-    return false;
-  });
-}
-
-function canUseStorage(submodule) {
-  return !!submodule.enabledStorageTypes.length;
-}
-
 function updateEIDConfig(submodules) {
   EID_CONFIG.clear();
   Object.entries(
@@ -1088,25 +948,27 @@ function updateEIDConfig(submodules) {
 }
 
 export function generateSubmoduleContainers(options, configs, prevSubmodules = submodules, registry = submoduleRegistry) {
-  const { autoRefresh, retainConfig } = options;
+  const { retainConfig } = options;
   return registry
     .reduce((acc, submodule) => {
       const { name, aliasName } = submodule;
       const matchesName = (query) => [name, aliasName].some(value => value?.toLowerCase() === query.toLowerCase());
       const submoduleConfig = configs.find((configItem) => matchesName(configItem.name));
+      const previousSubmodule = prevSubmodules.find(prevSubmodules => matchesName(prevSubmodules.config.name));
 
       if (!submoduleConfig) {
         if (!retainConfig) return acc;
-        const previousSubmodule = prevSubmodules.find(prevSubmodules => matchesName(prevSubmodules.config.name));
-        return previousSubmodule ? [...acc, previousSubmodule] : acc;
+        return previousSubmodule ? [...acc, Object.assign(previousSubmodule, { dirty: false, new: false })] : acc;
       }
+
+      const newConfig = {
+        ...submoduleConfig,
+        name: submodule.name
+      };
 
       const newSubmoduleContainer: SubmoduleContainer<UserIdProvider> = {
         submodule,
-        config: {
-          ...submoduleConfig,
-          name: submodule.name
-        },
+        config: newConfig,
         callback: undefined,
         idObj: undefined,
         storageMgr: newStorageManager({
@@ -1115,26 +977,31 @@ export function generateSubmoduleContainers(options, configs, prevSubmodules = s
           // since this manager is only using keys provided directly by the publisher,
           // turn off storageControl checks
           advertiseKeys: false,
-        })
+        }),
+        store: undefined,
+        dirty: previousSubmodule == null || !deepEqual(newConfig, previousSubmodule.config),
+        new: previousSubmodule == null
       };
-
-      if (autoRefresh) {
-        const previousSubmodule = prevSubmodules.find(prevSubmodules => matchesName(prevSubmodules.config.name));
-        newSubmoduleContainer.refreshIds = !previousSubmodule || !deepEqual(newSubmoduleContainer.config, previousSubmodule.config);
-      }
+      newSubmoduleContainer.store = newIdStore(newSubmoduleContainer);
 
       return [...acc, newSubmoduleContainer];
     }, []);
 }
 
-type SubmoduleContainer<P extends UserIdProvider> = {
+export type SubmoduleContainer<P extends UserIdProvider> = {
   submodule: IdProviderSpec<P>;
   enabledStorageTypes?: StorageType[];
   config: UserIdConfig<P>;
   callback?: ProviderResponse['callback'];
   idObj;
   storageMgr: StorageManager;
-  refreshIds?: boolean;
+  store: IdStore;
+  // the latest getId / extendId invocation; an older one completing late is ignored
+  handle?: InvocationHandle;
+  // true if this module was reconfigured (latest config is different from previous config)
+  dirty: boolean;
+  // true if this module was added (had no previous config)
+  new: boolean;
 };
 
 /**
@@ -1190,7 +1057,7 @@ export function requestDataDeletion(next, ...args) {
         logError(`Error calling onDataDeletionRequest for ID submodule ${submodule.submodule.name}`, e);
       }
     }
-    deleteStoredValue(submodule);
+    submodule.store.remove();
   });
   next.apply(this, args);
 }
@@ -1203,6 +1070,7 @@ export function attachIdSystem(submodule: IdProviderSpec<UserIdProvider>) {
   if (!(submoduleRegistry || []).find(i => i.name === submodule.name)) {
     submoduleRegistry.push(submodule);
     GDPR_GVLIDS.register(MODULE_TYPE_UID, submodule.name, submodule.gvlid);
+    GDPR_ACPIDS.register(MODULE_TYPE_UID, submodule.name, submodule.acpId);
     updateSubmodules();
     // TODO: a test case wants this to work even if called after init (the setConfig({userId}))
     // so we trigger a refresh. But is that even possible outside of tests?
@@ -1239,7 +1107,7 @@ const enforceStorageTypeRule = (userIdsConfig, enforceStorageType) => {
 
     if (!submoduleConfig || !submoduleConfig.storage) return;
 
-    if (params[ACTIVITY_PARAM_STORAGE_TYPE] !== submoduleConfig.storage.type) {
+    if (!getConfiguredStorageTypes(submoduleConfig).includes(params[ACTIVITY_PARAM_STORAGE_TYPE])) {
       const reason = `${submoduleConfig.name} attempts to store data in ${params[ACTIVITY_PARAM_STORAGE_TYPE]} while configuration allows ${submoduleConfig.storage.type}.`;
       if (enforceStorageType) {
         return { allow: false, reason };
@@ -1281,15 +1149,15 @@ export function init(config, { mkDelay = delay } = {}) {
         configRegistry = userSync.userIds;
         syncDelay = isNumber(userSync.syncDelay) ? userSync.syncDelay : USERSYNC_DEFAULT_CONFIG.syncDelay;
         auctionDelay = isNumber(userSync.auctionDelay) ? userSync.auctionDelay : USERSYNC_DEFAULT_CONFIG.auctionDelay;
-        updateSubmodules({ retainConfig, autoRefresh });
+        updateSubmodules({ retainConfig });
         unregisterEnforceStorageTypeRule?.();
         unregisterEnforceStorageTypeRule = registerActivityControl(ACTIVITY_ACCESS_DEVICE, 'enforceStorageTypeRule', enforceStorageTypeRule(submodules.map(({ config }) => config), enforceStorageType));
         updateIdPriority(userSync.idPriority, submoduleRegistry);
-        initIdSystem({ ready: true });
-        const submodulesToRefresh = submodules.filter(item => item.refreshIds);
+        const submodulesToRefresh = submodules.filter(item => autoRefresh ? item.dirty : item.new);
         if (submodulesToRefresh.length) {
-          refreshUserIds({ submoduleNames: submodulesToRefresh.map(item => item.submodule.name) });
+          initIdSystem({ refresh: true, forceNewModuleRefresh: false, submoduleNames: submodulesToRefresh.map(item => item.submodule.name) });
         }
+        initIdSystem({ ready: true });
       }
     }
   });

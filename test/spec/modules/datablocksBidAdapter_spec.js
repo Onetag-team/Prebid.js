@@ -522,11 +522,18 @@ describe('DatablocksAdapter', function() {
           expect(bid.native).to.be.a('object');
         }
       });
-
-      it('Returns an empty array if invalid response is passed', function() {
-        const serverResponses = spec.interpretResponse('invalid_response');
-        expect(serverResponses).to.be.an('array').that.is.empty;
-      });
     });
+
+    it('Returns an empty array if invalid response is passed', function() {
+      const serverResponses = spec.interpretResponse('invalid_response');
+      expect(serverResponses).to.be.an('array').that.is.empty;
+    });
+  });
+});
+
+describe('datablocksBidAdapter consent IDs', function () {
+  it('declares its Google Additional Consent provider ID', function () {
+    expect(spec.acpId).to.equal(3172);
+    expect(spec.gvlid).to.be.undefined;
   });
 });

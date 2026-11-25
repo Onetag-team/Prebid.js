@@ -1,4 +1,5 @@
-import { consentHandler, coppaDataHandler, gvlidRegistry, multiHandler } from '../../../../src/consentHandler.js';
+import { allConsent, consentHandler, coppaDataHandler, gcmDataHandler, gdprDataHandler, gppDataHandler, gvlidList, gvlidRegistry, multiHandler, normalizeGvlid, uspDataHandler, VENDORLESS_GVLID } from '../../../../src/consentHandler.js';
+import { cyrb53Hash } from '../../../../src/utils.js';
 import { config } from 'src/config.js';
 
 describe('Consent data handler', () => {
@@ -47,6 +48,13 @@ describe('Consent data handler', () => {
       handler.onChange(listener);
       handler.setConsentData(true);
       sinon.assert.notCalled(listener);
+    });
+    it('should keep listeners across reset', () => {
+      handler.onChange(listener);
+      handler.reset();
+      handler.enable();
+      handler.setConsentData('after reset');
+      sinon.assert.calledWith(listener, 'after reset');
     });
     describe('using hashFields', () => {
       beforeEach(() => {
@@ -127,6 +135,17 @@ describe('Consent data handler', () => {
       handler.setConsentData({ field: 'value', enabled: true });
       expect(handler.hash).to.eql(h1);
     });
+    it('is included in the combined hash by default', () => {
+      expect(handler.includeHash).to.be.true;
+    });
+    it('can decide whether it is included in the combined hash', () => {
+      handler = consentHandler({ includeHash: ({ enabled }) => enabled });
+      expect(handler.includeHash).to.be.false;
+      handler.enable();
+      expect(handler.includeHash).to.be.true;
+      handler.reset();
+      expect(handler.includeHash).to.be.false;
+    });
     it('does not change when non-hashFields are updated', () => {
       handler = consentHandler({ hashFields: ['field', 'enabled'] });
       handler.setConsentData({ field: 'value', enabled: true });
@@ -137,15 +156,40 @@ describe('Consent data handler', () => {
   });
 });
 
+describe('gdprDataHandler', () => {
+  const consent = { gdprApplies: true, consentString: 'tcString', addtlConsent: '2~1.2~dv.' };
+
+  beforeEach(() => {
+    gdprDataHandler.reset();
+    gdprDataHandler.enable();
+    gdprDataHandler.setConsentData(consent);
+  });
+
+  afterEach(() => {
+    gdprDataHandler.reset();
+  });
+
+  it('should detect changes to addtlConsent alone', () => {
+    const h1 = gdprDataHandler.hash;
+    const listener = sinon.stub();
+    gdprDataHandler.onChange(listener);
+    gdprDataHandler.setConsentData({ ...consent, addtlConsent: '2~1~dv.2' });
+    sinon.assert.calledOnce(listener);
+    expect(gdprDataHandler.hash).to.not.eql(h1);
+  });
+});
+
 describe('multiHandler', () => {
   let handlers, multi;
   beforeEach(() => {
     handlers = {
       h1: {
-        onChange: sinon.stub()
+        onChange: sinon.stub(),
+        includeHash: true
       },
       h2: {
-        onChange: sinon.stub()
+        onChange: sinon.stub(),
+        includeHash: true
       }
     };
     multi = multiHandler(handlers);
@@ -194,8 +238,29 @@ describe('multiHandler', () => {
         expect(multi.hash).to.not.eql(first);
       });
     });
+    it('leaves out handlers that do not include their hash', () => {
+      handlers.h1.hash = 'one';
+      handlers.h2.hash = 'two';
+      handlers.h2.includeHash = false;
+      const first = multi.hash;
+      handlers.h2.hash = 'new';
+      expect(multi.hash).to.eql(first);
+      handlers.h2.includeHash = true;
+      expect(multi.hash).to.not.eql(first);
+    });
   });
   describe('onChange', () => {
+    it('does not forward changes twice after reset', () => {
+      handlers.h1.reset = sinon.stub();
+      handlers.h2.reset = sinon.stub();
+      handlers.h1.getConsentData = () => 'one';
+      handlers.h2.getConsentData = () => 'two';
+      multi.reset();
+      const listener = sinon.stub();
+      multi.onChange(listener);
+      handlers.h1.onChange.args.forEach(([fn]) => fn());
+      sinon.assert.calledOnce(listener);
+    });
     ['h1', 'h2'].forEach((handler, i) => {
       it(`triggers when handler #${i + 1} changes`, () => {
         handlers.h1.getConsentData = () => 'one';
@@ -209,6 +274,63 @@ describe('multiHandler', () => {
         });
       });
     });
+  });
+});
+
+describe('consentHandler hash', () => {
+  let handler;
+  beforeEach(() => {
+    handler = consentHandler();
+    handler.enable();
+  });
+
+  it('reflects a change even if the same data is set again before the hash is read', () => {
+    const before = handler.hash;
+    handler.setConsentData({ a: 1 });
+    handler.setConsentData({ a: 1 });
+    expect(handler.hash).to.not.be.null;
+    expect(handler.hash).to.not.equal(before);
+  });
+
+  it('is computed after reset, even when the first data set is null', () => {
+    handler.setConsentData({ a: 1 });
+    const withData = handler.hash;
+    handler.reset();
+    handler.enable();
+    handler.setConsentData(null);
+    expect(handler.hash).to.not.be.null;
+    expect(handler.hash).to.not.equal(withData);
+  });
+});
+
+describe('allConsent', () => {
+  afterEach(() => gcmDataHandler.reset());
+
+  [['gdpr', gdprDataHandler], ['gpp', gppDataHandler], ['gcm', gcmDataHandler]].forEach(([name, handler]) => {
+    it(`keeps forwarding ${name} changes after the handler is reset (module disabled and re-enabled)`, () => {
+      const listener = sinon.stub();
+      allConsent.onChange(listener);
+      try {
+        handler.reset();
+        handler.enable();
+        handler.setConsentData({ marker: name });
+        sinon.assert.calledWith(listener, sinon.match({ [name]: { marker: name } }));
+      } finally {
+        handler.reset();
+      }
+    });
+  });
+
+  it('includes gcm', () => {
+    expect(allConsent.getConsentData()).to.have.property('gcm');
+  });
+
+  it('leaves gcm out of the hash until it is enabled', () => {
+    const legacyHash = () => cyrb53Hash([gdprDataHandler, uspDataHandler, gppDataHandler, coppaDataHandler].map(h => h.hash).join(':'));
+    expect(allConsent.hash).to.equal(legacyHash());
+    gcmDataHandler.enable();
+    gcmDataHandler.setConsentData({ ad_storage: 'denied' });
+    expect(allConsent.hash).to.not.equal(legacyHash());
   });
 });
 
@@ -240,7 +362,7 @@ describe('gvlidRegistry', () => {
     registry = gvlidRegistry();
   });
 
-  it('returns undef when id cannoot be found', () => {
+  it('returns undef when id cannot be found', () => {
     expect(registry.get('name')).to.eql({ modules: {} });
   });
 
@@ -259,5 +381,58 @@ describe('gvlidRegistry', () => {
     registry.register('type', 'name', 123);
     registry.register('otherType', 'name', 321);
     expect(registry.get('name')).to.eql({ modules: { type: 123, otherType: 321 } });
+  });
+
+  describe('lists of GVL IDs', () => {
+    it('can register a list', () => {
+      registry.register('type', 'name', [321, 123, 321]);
+      expect(registry.get('name')).to.eql({ gvlid: [123, 321], modules: { type: [123, 321] } });
+    });
+
+    it('returns `gvlid` when the same list is registered by more than one module', () => {
+      registry.register('type', 'name', [123, 321]);
+      registry.register('otherType', 'name', [321, 123]);
+      expect(registry.get('name').gvlid).to.eql([123, 321]);
+    });
+
+    it('does not return `gvlid` when different lists are registered', () => {
+      registry.register('type', 'name', [123, 321]);
+      registry.register('otherType', 'name', [123]);
+      expect(registry.get('name')).to.eql({ modules: { type: [123, 321], otherType: 123 } });
+    });
+
+    it('does not register empty lists', () => {
+      registry.register('type', 'name', []);
+      expect(registry.get('name')).to.eql({ modules: {} });
+    });
+  });
+});
+
+describe('normalizeGvlid', () => {
+  Object.entries({
+    'null': [null, null],
+    'undefined': [undefined, null],
+    'a number': [123, 123],
+    'VENDORLESS_GVLID': [VENDORLESS_GVLID, VENDORLESS_GVLID],
+    'an empty list': [[], null],
+    'a list with a single element': [[123], 123],
+    'a list with duplicates': [[3, 1, 3, 2], [1, 2, 3]],
+    'a list with non-numbers': [[2, 'x', null, 1], [1, 2]],
+  }).forEach(([t, [input, expected]]) => {
+    it(`handles ${t}`, () => {
+      expect(normalizeGvlid(input)).to.eql(expected);
+    });
+  });
+});
+
+describe('gvlidList', () => {
+  Object.entries({
+    'null': [null, []],
+    'a number': [123, [123]],
+    'a list': [[1, 2], [1, 2]],
+  }).forEach(([t, [input, expected]]) => {
+    it(`handles ${t}`, () => {
+      expect(gvlidList(input)).to.eql(expected);
+    });
   });
 });

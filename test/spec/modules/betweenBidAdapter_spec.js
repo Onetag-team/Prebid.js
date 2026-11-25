@@ -22,6 +22,7 @@ describe('betweenBidAdapterTests', function () {
     const request = spec.buildRequests(bidRequestData);
     const req_data = JSON.parse(request.data)[0].data;
     expect(req_data.bidid).to.equal('bid1234');
+    expect(req_data.fl).to.equal(0);
   });
 
   it('validate_video_params', function () {
@@ -305,8 +306,8 @@ describe('betweenBidAdapterTests', function () {
   it('check getUserSyncs', function() {
     const syncs = spec.getUserSyncs({}, {});
     expect(syncs).to.be.an('array').that.to.have.lengthOf(2);
-    expect(syncs[0]).to.deep.equal({ type: 'iframe', url: 'https://ads.betweendigital.com/sspmatch-iframe' });
-    expect(syncs[1]).to.deep.equal({ type: 'image', url: 'https://ads.betweendigital.com/sspmatch' });
+    expect(syncs[0]).to.deep.equal({ type: 'iframe', url: 'https://ads.btwnx.com/sspmatch-iframe' });
+    expect(syncs[1]).to.deep.equal({ type: 'image', url: 'https://ads.btwnx.com/sspmatch' });
   });
 
   it('check sizes', function() {

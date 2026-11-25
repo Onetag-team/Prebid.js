@@ -1,7 +1,8 @@
 import { registerBidder } from '../src/adapters/bidderFactory.js';
-import { config } from '../src/config.js';
 import { _each, canAccessWindowTop, deepAccess, deepSetValue, getDomLoadingDuration, getWindowSelf, getWindowTop } from '../src/utils.js';
+import { coppaDataHandler } from '../src/consentHandler.js';
 export const BIDDER_CODE = 'bliink';
+const GVLID = 658;
 export const BLIINK_ENDPOINT_ENGINE = 'https://engine.bliink.io/prebid';
 
 export const BLIINK_ENDPOINT_COOKIE_SYNC_IFRAME = 'https://tag.bliink.io/usersync.html';
@@ -12,15 +13,8 @@ const VIDEO = 'video';
 const BANNER = 'banner';
 window.bliinkBid = window.bliinkBid || {};
 const supportedMediaTypes = [BANNER, VIDEO];
-const aliasBidderCode = ['bk'];
+const aliasBidderCode = [{ code: 'bk', gvlid: GVLID }];
 const CURRENCY = 'EUR';
-
-/**
- * @description get coppa value from config
- */
-function getCoppa() {
-  return config.getConfig('coppa') === true ? 1 : 0;
-}
 
 /**
  * Retrieves the effective connection type from the browser's Navigator API.
@@ -237,7 +231,7 @@ export const buildRequests = (validBidRequests, bidderRequest) => {
     request.gdpr = true;
     deepSetValue(request, 'gdprConsent', gdprConsent.consentString);
   }
-  if (config.getConfig('coppa')) {
+  if ((bidderRequest?.ortb2?.regs?.coppa === 1 || coppaDataHandler.getCoppa())) {
     request.coppa = 1;
   }
   if (bidderRequest.uspConsent) {
@@ -273,7 +267,7 @@ const interpretResponse = (serverResponse) => {
  * @param gdprConsent
  * @return {[{type: string, url: string}]|*[]}
  */
-const getUserSyncs = (syncOptions, serverResponses, gdprConsent, uspConsent) => {
+const getUserSyncs = (syncOptions, serverResponses, gdprConsent, uspConsent, gppConsent, coppa) => {
   const syncs = [];
   if (syncOptions.pixelEnabled && serverResponses.length > 0) {
     let gdprParams = '';
@@ -294,7 +288,7 @@ const getUserSyncs = (syncOptions, serverResponses, gdprConsent, uspConsent) => 
       sync = [
         {
           type: 'iframe',
-          url: `${BLIINK_ENDPOINT_COOKIE_SYNC_IFRAME}?gdpr=${gdpr}&coppa=${getCoppa()}${uspConsentStr}${gdprParams}${apiVersion}`,
+          url: `${BLIINK_ENDPOINT_COOKIE_SYNC_IFRAME}?gdpr=${gdpr}&coppa=${coppa ? 1 : 0}${uspConsentStr}${gdprParams}${apiVersion}`,
         },
       ];
     } else {
@@ -308,10 +302,11 @@ const getUserSyncs = (syncOptions, serverResponses, gdprConsent, uspConsent) => 
 };
 
 /**
- * @type {{interpretResponse: typeof interpretResponse, code: string, aliases: string[], getUserSyncs: typeof getUserSyncs, buildRequests: typeof buildRequests, isBidRequestValid: typeof isBidRequestValid}}
+ * @type {{interpretResponse: typeof interpretResponse, code: string, gvlid: number, aliases: {code: string, gvlid: number}[], getUserSyncs: typeof getUserSyncs, buildRequests: typeof buildRequests, isBidRequestValid: typeof isBidRequestValid}}
  */
 export const spec = {
   code: BIDDER_CODE,
+  gvlid: GVLID,
   aliases: aliasBidderCode,
   supportedMediaTypes: supportedMediaTypes,
   isBidRequestValid,

@@ -1,13 +1,18 @@
 import {
   getVastTrackers,
-  insertVastTrackers,
   registerVastTrackers,
   reset, updateVastHook,
-  disable,
-  getTrackersFromBidResponse
+  enable,
+  disable
 } from 'libraries/vastTrackers/vastTrackers.js';
+import { insertVastTrackers } from '../../../src/utils/vast.js';
 import { MODULE_TYPE_ANALYTICS } from '../../../src/activities/modules.js';
 import { AuctionIndex } from '../../../src/auctionIndex.js';
+import { handleVideoBidCaching, store, updateVast } from '../../../src/videoCache.js';
+import { auctionManager } from '../../../src/auctionManager.js';
+import { config } from '../../../src/config.js';
+import { cachedVideoImpressionVerifier, tracker as bidTracker } from 'modules/videoModule/videoImpressionVerifier.js';
+import { vastXmlEditorFactory } from 'libraries/video/shared/vastXmlEditor.js';
 
 // Helper functions to reduce code duplication
 function createPlaybackTracker() {
@@ -234,93 +239,9 @@ describe('vast trackers', () => {
     });
   });
 
-  describe('vastImpUrl fallback support', () => {
-    beforeEach(() => {
-      reset();
-    });
-
-    it('should include vastImpUrl from bid response as string', function () {
-      registerVastTrackers(MODULE_TYPE_ANALYTICS, 'emptyTest', createEmptyTracker());
-
-      const bidWithImpUrl = {
-        ...bid,
-        vastImpUrl: 'https://bidder.com/impression'
-      };
-
-      const trackers = getVastTrackers(bidWithImpUrl, { index });
-      expect(trackers).to.be.an('object');
-      expect(trackers.impression).to.include('https://bidder.com/impression');
-    });
-
-    it('should include vastImpUrl from bid response as array', function () {
-      registerVastTrackers(MODULE_TYPE_ANALYTICS, 'emptyTest', createEmptyTracker());
-
-      const bidWithImpUrls = {
-        ...bid,
-        vastImpUrl: ['https://bidder1.com/impression', 'https://bidder2.com/impression']
-      };
-
-      const trackers = getVastTrackers(bidWithImpUrls, { index });
-      expect(trackers).to.be.an('object');
-      expect(trackers.impression).to.include('https://bidder1.com/impression');
-      expect(trackers.impression).to.include('https://bidder2.com/impression');
-    });
-
-    it('should ignore empty vastImpUrl', function () {
-      const emptyTracker = sinon.stub().callsFake(function () {
-        return {
-          impression: ['https://analytics.com/impression'],
-          error: [],
-          trackingEvents: []
-        };
-      });
-      registerVastTrackers(MODULE_TYPE_ANALYTICS, 'emptyImpTest', emptyTracker);
-
-      const bidWithEmptyImpUrl = {
-        ...bid,
-        vastImpUrl: ''
-      };
-
-      const trackers = getVastTrackers(bidWithEmptyImpUrl, { index });
-      expect(trackers.impression).to.have.lengthOf(1);
-      expect(trackers.impression).to.include('https://analytics.com/impression');
-    });
-
-    it('getTrackersFromBidResponse should include string vastImpUrl in impression', function () {
-      const trackers = getTrackersFromBidResponse({ vastImpUrl: 'https://bidder.com/impression' });
-
-      expect(trackers).to.be.an('object');
-      expect(trackers.impression).to.have.lengthOf(1);
-      expect(trackers.impression).to.include('https://bidder.com/impression');
-    });
-
-    it('getTrackersFromBidResponse should include array vastImpUrl in impression', function () {
-      const trackers = getTrackersFromBidResponse({ vastImpUrl: ['https://bidder1.com/imp', 'https://bidder2.com/imp'] });
-
-      expect(trackers).to.be.an('object');
-      expect(trackers.impression).to.have.lengthOf(2);
-      expect(trackers.impression).to.include('https://bidder1.com/imp');
-      expect(trackers.impression).to.include('https://bidder2.com/imp');
-    });
-
-    it('getTrackersFromBidResponse should return null when no trackers present', function () {
-      const trackers = getTrackersFromBidResponse({});
-
-      expect(trackers).to.be.null;
-    });
-
-    it('getTrackersFromBidResponse should merge vastTrackers and vastImpUrl', function () {
-      const trackers = getTrackersFromBidResponse({
-        vastTrackers: {
-          impression: ['https://tracker.com/imp']
-        },
-        vastImpUrl: 'https://bidder.com/imp'
-      });
-
-      expect(trackers.impression).to.have.lengthOf(2);
-      expect(trackers.impression).to.include('https://tracker.com/imp');
-      expect(trackers.impression).to.include('https://bidder.com/imp');
-    });
+  it('should leave vastImpUrl for core to add', function () {
+    const trackers = getVastTrackers({ ...bid, vastImpUrl: 'https://bidder.com/impression' }, { index });
+    expect(trackers.impression).to.not.include('https://bidder.com/impression');
   });
 
   describe('vastTrackers from bid response support', () => {
@@ -356,41 +277,90 @@ describe('vast trackers', () => {
       expect(trackers.error).to.have.lengthOf(2);
       expect(trackers.trackingEvents).to.have.lengthOf(2);
     });
-
-    it('getTrackersFromBidResponse should return normalized object', function () {
-      const bidWithTrackers = {
-        vastTrackers: {
-          impression: ['https://imp1.com', 'https://imp2.com'],
-          error: ['https://error.com'],
-          trackingEvents: [{ event: 'start', url: 'https://start.com' }]
-        }
-      };
-
-      const trackers = getTrackersFromBidResponse(bidWithTrackers);
-      expect(trackers).to.be.an('object');
-      expect(trackers.impression).to.have.lengthOf(2);
-      expect(trackers.error).to.have.lengthOf(1);
-      expect(trackers.trackingEvents).to.have.lengthOf(1);
-    });
-
-    it('getTrackersFromBidResponse should return null when no vastTrackers', function () {
-      const trackers = getTrackersFromBidResponse({});
-      expect(trackers).to.be.null;
-    });
-
-    it('getTrackersFromBidResponse should handle partial vastTrackers object', function () {
-      const bidWithPartialTrackers = {
-        vastTrackers: {
-          impression: ['https://imp.com']
-          // error and trackingEvents not provided
-        }
-      };
-
-      const trackers = getTrackersFromBidResponse(bidWithPartialTrackers);
-      expect(trackers).to.be.an('object');
-      expect(trackers.impression).to.have.lengthOf(1);
-      expect(trackers.error).to.be.an('array').that.is.empty;
-      expect(trackers.trackingEvents).to.be.an('array').that.is.empty;
-    });
   });
+
+  if (FEATURES.VIDEO) {
+    it('should not modify vastXml', () => {
+      const vastXml = '<VAST><Ad><Wrapper></Wrapper></Ad></VAST>';
+      const videoBid = { ...bid, vastXml };
+      updateVastHook({ index })(sinon.stub(), videoBid);
+      expect(videoBid.vastXml).to.equal(vastXml);
+      expect(videoBid.vastTrackers.impression).to.eql(['https://vasttracking.mydomain.com/vast?cpm=1']);
+    });
+
+    describe('with core and the video module', () => {
+      function runUpdateVast(videoBid) {
+        disable();
+        try {
+          updateVastHook({ index })(updateVast, videoBid);
+        } finally {
+          enable();
+        }
+      }
+
+      it('should cache each tracker once', () => {
+        const videoBid = { ...createBidWithTrackers(bid), adId: 'ad', adUnitCode: 'unit', vastUrl: 'https://bidder.example/vast' };
+        const adUnit = {
+          code: 'unit',
+          video: {
+            adServer: {
+              tracking: {
+                impression: { getUrl: () => 'https://publisher.example/impression', id: 'imp-id' },
+                error: { getUrl: () => 'https://publisher.example/error' }
+              }
+            }
+          }
+        };
+        cachedVideoImpressionVerifier(vastXmlEditorFactory(), bidTracker()).trackBid(videoBid, adUnit);
+        runUpdateVast(videoBid);
+        const ajax = sinon.stub();
+
+        store([videoBid], sinon.stub(), () => ajax);
+
+        const cachedXml = JSON.parse(ajax.firstCall.args[2]).puts[0].value;
+        const doc = new DOMParser().parseFromString(cachedXml, 'text/xml');
+        expect(doc.querySelectorAll('parsererror')).to.have.lengthOf(0);
+        const urls = selector => Array.from(doc.querySelectorAll(selector), node => node.textContent);
+        expect(urls('Wrapper > Impression')).to.eql([
+          'https://publisher.example/impression', 'https://vasttracking.mydomain.com/vast?cpm=1', 'https://bidder.com/impression'
+        ]);
+        expect(doc.querySelector('Impression').getAttribute('id')).to.equal('imp-id');
+        expect(urls('Wrapper > Error')).to.eql(['https://publisher.example/error', 'https://bidder.com/error']);
+        expect(urls('Tracking[event="start"]')).to.eql(['https://bidder.com/start']);
+      });
+
+      it('should add each tracker once when the bid goes through handleVideoBidCaching', () => {
+        sandbox.stub(auctionManager.index, 'getAuction').returns(auction);
+        sandbox.stub(auctionManager.index, 'getBidRequest').returns(bidRequest);
+        config.setConfig({ cache: { useLocal: true } });
+        try {
+          const videoBid = { ...createBidWithTrackers(bid), vastUrl: 'https://bidder.example/vast', vastImpUrl: 'https://bidder.com/legacy' };
+          handleVideoBidCaching({
+            bidResponse: videoBid,
+            auctionInstance: { addBidReceived: sinon.stub() },
+            afterBidAdded: sinon.stub(),
+            videoMediaType: { context: 'instream' }
+          });
+          const doc = new DOMParser().parseFromString(videoBid.vastXml, 'text/xml');
+          const urls = selector => Array.from(doc.querySelectorAll(selector), node => node.textContent);
+          expect(urls('Wrapper > Impression')).to.eql([
+            'https://vasttracking.mydomain.com/vast?cpm=1', 'https://bidder.com/impression', 'https://bidder.com/legacy'
+          ]);
+          expect(urls('Wrapper > Error')).to.eql(['https://bidder.com/error']);
+          expect(urls('Tracking[event="start"]')).to.eql(['https://bidder.com/start']);
+        } finally {
+          config.resetConfig();
+        }
+      });
+
+      it('should add vastImpUrl once', () => {
+        const videoBid = { ...bid, vastUrl: 'https://bidder.example/vast', vastImpUrl: 'https://bidder.com/legacy' };
+        runUpdateVast(videoBid);
+        const doc = new DOMParser().parseFromString(videoBid.vastXml, 'text/xml');
+        expect(Array.from(doc.querySelectorAll('Impression'), node => node.textContent)).to.eql([
+          'https://vasttracking.mydomain.com/vast?cpm=1', 'https://bidder.com/legacy'
+        ]);
+      });
+    });
+  }
 });

@@ -36,11 +36,17 @@ import { hook } from '../../../src/hook.js';
 import { mockGdprConsent } from '../../helpers/consentData.js';
 import { getPPID } from '../../../src/adserver.js';
 import { uninstall as uninstallTcfControl } from 'modules/tcfControl.js';
-import { allConsent, GDPR_GVLIDS, gdprDataHandler } from '../../../src/consentHandler.js';
+import { allConsent, GDPR_ACPIDS, GDPR_GVLIDS, gdprDataHandler } from '../../../src/consentHandler.js';
 import { MODULE_TYPE_UID } from '../../../src/activities/modules.js';
-import { ACTIVITY_ENRICH_EIDS } from '../../../src/activities/activities.js';
-import { ACTIVITY_PARAM_COMPONENT_NAME, ACTIVITY_PARAM_COMPONENT_TYPE } from '../../../src/activities/params.js';
-import { registerActivityControl } from '../../../src/activities/rules.js';
+import { ACTIVITY_ACCESS_DEVICE, ACTIVITY_ENRICH_EIDS } from '../../../src/activities/activities.js';
+import {
+  ACTIVITY_PARAM_COMPONENT_NAME,
+  ACTIVITY_PARAM_COMPONENT_TYPE,
+  ACTIVITY_PARAM_STORAGE_TYPE,
+  ACTIVITY_PARAM_STORAGE_WRITE
+} from '../../../src/activities/params.js';
+import { isActivityAllowed, registerActivityControl } from '../../../src/activities/rules.js';
+import { activityParams } from '../../../src/activities/activityParams.js';
 import {
   discloseStorageUse,
   getCoreStorageManager,
@@ -52,6 +58,15 @@ import {
 const assert = require('chai').assert;
 const expect = require('chai').expect;
 const EXPIRED_COOKIE_DATE = 'Thu, 01 Jan 1970 00:00:01 GMT';
+
+// The module writes the pubcid cookies on sharedId's domainOverride(): the page's root domain, which a page on a
+// real domain has (bs-local.com on a BrowserStack device) and localhost doesn't. Erase both that one and a host-only
+// one, or a cookie the module wrote outlives the test that erased it.
+function eraseCookie(name) {
+  coreStorage.setCookie(name, '', EXPIRED_COOKIE_DATE);
+  const domain = sharedIdSystemSubmodule.domainOverride?.();
+  if (domain) coreStorage.setCookie(name, '', EXPIRED_COOKIE_DATE, undefined, domain);
+}
 const CONSENT_LOCAL_STORAGE_NAME = '_pbjs_userid_consent_data';
 
 describe('User ID', function () {
@@ -210,6 +225,16 @@ describe('User ID', function () {
       attachIdSystem({ name: 'gvlidMock', gvlid: 123 });
       sinon.assert.calledWith(GDPR_GVLIDS.register, MODULE_TYPE_UID, 'gvlidMock', 123);
     });
+
+    it('registers Additional Consent provider IDs', () => {
+      sinon.stub(GDPR_ACPIDS, 'register');
+      try {
+        attachIdSystem({ name: 'acpIdMock', acpId: 321 });
+        sinon.assert.calledWith(GDPR_ACPIDS.register, MODULE_TYPE_UID, 'acpIdMock', 321);
+      } finally {
+        GDPR_ACPIDS.register.restore();
+      }
+    });
   });
 
   describe('userId config validation', () => {
@@ -276,7 +301,7 @@ describe('User ID', function () {
       // reset mockGpt so nothing else interferes
       mockGpt.disable();
       mockGpt.enable();
-      coreStorage.setCookie('pubcid', '', EXPIRED_COOKIE_DATE);
+      eraseCookie('pubcid');
       coreStorage.setCookie('pubcid_alt', 'altpubcid200000', (new Date(Date.now() + 20000).toUTCString()));
       sinon.spy(coreStorage, 'setCookie');
       sinon.stub(utils, 'logWarn');
@@ -291,8 +316,8 @@ describe('User ID', function () {
     });
 
     after(function () {
-      coreStorage.setCookie('pubcid', '', EXPIRED_COOKIE_DATE);
-      coreStorage.setCookie('pubcid_alt', '', EXPIRED_COOKIE_DATE);
+      eraseCookie('pubcid');
+      eraseCookie('pubcid_alt');
     });
 
     function getGlobalEids() {
@@ -321,32 +346,31 @@ describe('User ID', function () {
     });
 
     it('Check different cookies', async function () {
-      let pubcid1;
-      let pubcid2;
+      // Each auction's id comes from its EIDs rather than from reading the pubcid cookie back, which real Safari
+      // doesn't reliably return on the test page.
+      const pubcidOf = (eids) => {
+        expect(eids).to.have.length(1);
+        expect(eids[0].source).to.equal('pubcid.org');
+        expect(eids[0].uids).to.have.length(1);
+        expect(eids[0].uids[0].atype).to.equal(1);
+        expect(eids[0].uids[0].id).to.be.a('string').and.not.be.empty;
+        return eids[0].uids[0].id;
+      };
 
       init(config);
       setSubmoduleRegistry([sharedIdSystemSubmodule]);
 
       config.setConfig(getConfigMock(['pubCommonId', 'pubcid', 'cookie']));
 
-      const eids1 = await getGlobalEids();
-      pubcid1 = coreStorage.getCookie('pubcid'); // get first cookie
-      coreStorage.setCookie('pubcid', '', EXPIRED_COOKIE_DATE); // erase cookie
-      expect(eids1).to.eql([{
-        source: 'pubcid.org',
-        uids: [{ id: pubcid1, atype: 1 }]
-      }]);
+      const pubcid1 = pubcidOf(await getGlobalEids());
+      eraseCookie('pubcid'); // erase cookie
 
       init(config);
       setSubmoduleRegistry([sharedIdSystemSubmodule]);
       config.setConfig(getConfigMock(['pubCommonId', 'pubcid', 'cookie']));
 
-      const eids2 = await getGlobalEids();
-      pubcid2 = coreStorage.getCookie('pubcid'); // get second cookie
-      expect(eids2).to.eql([{
-        source: 'pubcid.org',
-        uids: [{ id: pubcid2, atype: 1 }]
-      }]);
+      const pubcid2 = pubcidOf(await getGlobalEids());
+      // the erased cookie's id wasn't reused
       expect(pubcid1).to.not.equal(pubcid2);
     });
 
@@ -376,6 +400,254 @@ describe('User ID', function () {
         source: 'pubcid.org',
         uids: [{ id: 'altpubcid200000', atype: 1 }]
       }]);
+    });
+
+    it('Extend cookie with pixelUrl: getUserIdsAsync resolves once the pixel loads', async function () {
+      let customConfig = getConfigMock(['pubCommonId', 'pubcid_alt', 'cookie']);
+      customConfig = addConfig(customConfig, 'params', { extend: true, pixelUrl: '/any/pubcid/url' });
+      // run submodule callbacks right away instead of after the first auction
+      customConfig.userSync.auctionDelay = 10;
+      const triggerPixel = sinon.stub(utils, 'triggerPixel').callsFake((url, done) => setTimeout(done));
+      try {
+        init(config);
+        setSubmoduleRegistry([sharedIdSystemSubmodule]);
+        config.setConfig(customConfig);
+
+        const ids = await Promise.race([
+          getGlobal().getUserIdsAsync(),
+          new Promise((resolve, reject) => setTimeout(() => reject(new Error('getUserIdsAsync did not resolve')), 1000))
+        ]);
+        expect(ids).to.eql({ pubcid: 'altpubcid200000' });
+        sinon.assert.calledOnce(triggerPixel);
+        expect(triggerPixel.firstCall.args[0]).to.include('/any/pubcid/url');
+      } finally {
+        triggerPixel.restore();
+      }
+    });
+
+    it('First visit with pixelUrl: the cookie the server sets is not rewritten from script after the pixel', async function () {
+      let customConfig = getConfigMock(['pubCommonId', 'pubcid', 'cookie']);
+      customConfig = addConfig(customConfig, 'params', { pixelUrl: '/any/pubcid/url' });
+      // run submodule callbacks right away instead of after the first auction
+      customConfig.userSync.auctionDelay = 10;
+
+      // record script writes to document.cookie, and when the pixel fired relative to them
+      let proto = Object.getPrototypeOf(document);
+      while (proto && !Object.getOwnPropertyDescriptor(proto, 'cookie')) proto = Object.getPrototypeOf(proto);
+      const nativeCookie = Object.getOwnPropertyDescriptor(proto, 'cookie');
+      const scriptWrites = [];
+      let writesBeforePixel = null;
+      Object.defineProperty(document, 'cookie', {
+        configurable: true,
+        get() { return nativeCookie.get.call(document); },
+        set(value) {
+          scriptWrites.push(value);
+          nativeCookie.set.call(document, value);
+        }
+      });
+      // the endpoint sets the cookie from the server, then the pixel loads
+      const triggerPixel = sinon.stub(utils, 'triggerPixel').callsFake((url, done) => {
+        writesBeforePixel = scriptWrites.length;
+        const id = url.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/)[0];
+        nativeCookie.set.call(document, `pubcid=${id}; path=/`);
+        setTimeout(done);
+      });
+      try {
+        init(config);
+        setSubmoduleRegistry([sharedIdSystemSubmodule]);
+        config.setConfig(customConfig);
+
+        const ids = await Promise.race([
+          getGlobal().getUserIdsAsync(),
+          new Promise((resolve, reject) => setTimeout(() => reject(new Error('getUserIdsAsync did not resolve')), 1000))
+        ]);
+        sinon.assert.calledOnce(triggerPixel);
+        expect(ids.pubcid).to.be.a('string').and.not.be.empty;
+        expect(triggerPixel.firstCall.args[0]).to.include('/any/pubcid/url').and.include(ids.pubcid);
+        // getId's id was stored from script before the pixel...
+        expect(scriptWrites.slice(0, writesBeforePixel).some(w => w.startsWith('pubcid='))).to.be.true;
+        // ...but not again after it
+        expect(scriptWrites.slice(writesBeforePixel).filter(w => w.startsWith('pubcid='))).to.eql([]);
+      } finally {
+        delete document.cookie;
+        triggerPixel.restore();
+      }
+    });
+
+    function userIdsAfterCallbacks() {
+      return Promise.race([
+        getGlobal().getUserIdsAsync(),
+        new Promise((resolve, reject) => setTimeout(() => reject(new Error('getUserIdsAsync did not resolve')), 1000))
+      ]);
+    }
+
+    function recordCookieWrites() {
+      const domain = sharedIdSystemSubmodule.domainOverride?.();
+      let proto = Object.getPrototypeOf(document);
+      while (proto && !Object.getOwnPropertyDescriptor(proto, 'cookie')) proto = Object.getPrototypeOf(proto);
+      const nativeCookie = Object.getOwnPropertyDescriptor(proto, 'cookie');
+      const writes = [];
+      Object.defineProperty(document, 'cookie', {
+        configurable: true,
+        get() { return nativeCookie.get.call(document); },
+        set(value) {
+          writes.push(value);
+          nativeCookie.set.call(document, value);
+        }
+      });
+      return {
+        writes,
+        setFromServer: (cookie) => nativeCookie.set.call(document, `${cookie}${domain ? `; domain=${domain}` : ''}`),
+        restore: () => { delete document.cookie; }
+      };
+    }
+
+    it('Returning visit with pixelUrl and extend: an ID the endpoint deleted is dropped', async function () {
+      let customConfig = getConfigMock(['pubCommonId', 'pubcid_alt', 'cookie']);
+      customConfig = addConfig(customConfig, 'params', { extend: true, pixelUrl: '/any/pubcid/url' });
+      customConfig.userSync.auctionDelay = 10;
+      const triggerPixel = sinon.stub(utils, 'triggerPixel').callsFake((url, done) => {
+        eraseCookie('pubcid_alt');
+        setTimeout(done);
+      });
+      const getId = sinon.spy(sharedIdSystemSubmodule, 'getId');
+      const extendId = sinon.spy(sharedIdSystemSubmodule, 'extendId');
+      try {
+        init(config);
+        setSubmoduleRegistry([sharedIdSystemSubmodule]);
+        // a consent hash matching the current one, so that the stored ID is extended rather than fetched again
+        coreStorage.setCookie('pubcid_alt_cst', getConsentHash(), (new Date(Date.now() + 20000)).toUTCString(), undefined, sharedIdSystemSubmodule.domainOverride?.());
+        config.setConfig(customConfig);
+        expect(await userIdsAfterCallbacks()).to.eql({});
+        sinon.assert.calledOnce(extendId);
+        sinon.assert.notCalled(getId);
+        sinon.assert.calledOnce(triggerPixel);
+        expect(await getGlobalEids() ?? []).to.eql([]);
+        expect(coreStorage.getCookie('pubcid_alt')).to.not.be.ok;
+        expect(coreStorage.getCookie('pubcid_alt_cst')).to.not.be.ok;
+      } finally {
+        triggerPixel.restore();
+        getId.restore();
+        extendId.restore();
+        eraseCookie('pubcid_alt_cst');
+      }
+    });
+
+    it('Returning visit with pixelUrl that runs getId again: the stored ID is not rewritten from script', async function () {
+      let customConfig = getConfigMock(['pubCommonId', 'pubcid', 'cookie']);
+      customConfig = addConfig(customConfig, 'params', { pixelUrl: '/any/pubcid/url' });
+      customConfig.userSync.auctionDelay = 10;
+      // without a stored consent hash, getId runs rather than extendId
+      eraseCookie('pubcid_cst');
+      const cookies = recordCookieWrites();
+      cookies.setFromServer('pubcid=server-set-id; path=/');
+      const triggerPixel = sinon.stub(utils, 'triggerPixel').callsFake((url, done) => setTimeout(done));
+      const getId = sinon.spy(sharedIdSystemSubmodule, 'getId');
+      try {
+        init(config);
+        setSubmoduleRegistry([sharedIdSystemSubmodule]);
+        config.setConfig(customConfig);
+        expect(await userIdsAfterCallbacks()).to.eql({ pubcid: 'server-set-id' });
+        sinon.assert.calledOnce(getId);
+        sinon.assert.calledOnce(triggerPixel);
+        expect(cookies.writes.filter(w => w.startsWith('pubcid='))).to.eql([]);
+        expect(cookies.writes.some(w => w.startsWith('pubcid_cst='))).to.be.true;
+      } finally {
+        cookies.restore();
+        triggerPixel.restore();
+        getId.restore();
+        eraseCookie('pubcid_cst');
+      }
+    });
+
+    it('First visit with pixelUrl: an ID the endpoint restored is adopted without being rewritten from script', async function () {
+      let customConfig = getConfigMock(['pubCommonId', 'pubcid', 'cookie']);
+      customConfig = addConfig(customConfig, 'params', { pixelUrl: '/any/pubcid/url' });
+      customConfig.userSync.auctionDelay = 10;
+      const cookies = recordCookieWrites();
+      let writesBeforePixel = null;
+      const triggerPixel = sinon.stub(utils, 'triggerPixel').callsFake((url, done) => {
+        writesBeforePixel = cookies.writes.length;
+        cookies.setFromServer('pubcid=restored-by-server; path=/');
+        setTimeout(done);
+      });
+      try {
+        init(config);
+        setSubmoduleRegistry([sharedIdSystemSubmodule]);
+        config.setConfig(customConfig);
+        expect(await userIdsAfterCallbacks()).to.eql({ pubcid: 'restored-by-server' });
+        expect(cookies.writes.slice(writesBeforePixel).filter(w => w.startsWith('pubcid='))).to.eql([]);
+        // the consent hash is still recorded, so the next page view doesn't run getId again
+        expect(cookies.writes.slice(writesBeforePixel).some(w => w.startsWith('pubcid_cst='))).to.be.true;
+      } finally {
+        cookies.restore();
+        triggerPixel.restore();
+        eraseCookie('pubcid_cst');
+      }
+    });
+
+    it('First visit with pixelUrl and create: false: the ID the endpoint sets is adopted without being rewritten from script', async function () {
+      let customConfig = getConfigMock(['pubCommonId', 'pubcid', 'cookie']);
+      customConfig = addConfig(customConfig, 'params', { pixelUrl: '/any/pubcid/url', create: false });
+      customConfig.userSync.auctionDelay = 10;
+      const cookies = recordCookieWrites();
+      const triggerPixel = sinon.stub(utils, 'triggerPixel').callsFake((url, done) => {
+        cookies.setFromServer('pubcid=server-generated-id; path=/');
+        setTimeout(done);
+      });
+      try {
+        init(config);
+        setSubmoduleRegistry([sharedIdSystemSubmodule]);
+        config.setConfig(customConfig);
+        expect(await userIdsAfterCallbacks()).to.eql({ pubcid: 'server-generated-id' });
+        expect(cookies.writes.filter(w => w.startsWith('pubcid='))).to.eql([]);
+      } finally {
+        cookies.restore();
+        triggerPixel.restore();
+        eraseCookie('pubcid_cst');
+      }
+    });
+
+    it('First visit with pixelUrl: an ID the endpoint deleted is dropped', async function () {
+      let customConfig = getConfigMock(['pubCommonId', 'pubcid', 'cookie']);
+      customConfig = addConfig(customConfig, 'params', { pixelUrl: '/any/pubcid/url' });
+      customConfig.userSync.auctionDelay = 10;
+      const triggerPixel = sinon.stub(utils, 'triggerPixel').callsFake((url, done) => {
+        eraseCookie('pubcid');
+        setTimeout(done);
+      });
+      try {
+        init(config);
+        setSubmoduleRegistry([sharedIdSystemSubmodule]);
+        config.setConfig(customConfig);
+        expect(await userIdsAfterCallbacks()).to.eql({});
+        sinon.assert.calledOnce(triggerPixel);
+        expect(coreStorage.getCookie('pubcid')).to.not.be.ok;
+        expect(coreStorage.getCookie('pubcid_cst')).to.not.be.ok;
+      } finally {
+        triggerPixel.restore();
+        eraseCookie('pubcid_cst');
+      }
+    });
+
+    it('pixelUrl without storage: the ID getId provides is kept after the pixel', async function () {
+      const triggerPixel = sinon.stub(utils, 'triggerPixel').callsFake((url, done) => setTimeout(done));
+      try {
+        init(config);
+        setSubmoduleRegistry([sharedIdSystemSubmodule]);
+        config.setConfig({
+          userSync: {
+            auctionDelay: 10,
+            userIds: [{ name: 'pubCommonId', params: { pixelUrl: '/any/pubcid/url' } }]
+          }
+        });
+        const ids = await userIdsAfterCallbacks();
+        sinon.assert.calledOnce(triggerPixel);
+        expect(ids.pubcid).to.be.a('string').and.not.be.empty;
+        expect(triggerPixel.firstCall.args[0]).to.include(ids.pubcid);
+      } finally {
+        triggerPixel.restore();
+      }
     });
 
     it('Disable auto create', async function () {
@@ -603,6 +875,99 @@ describe('User ID', function () {
         expect(getGlobal().getUserIds()).to.deep.equal(ids);
         done();
       });
+    });
+
+    it('initializes submodules added after initial configuration', async function () {
+      const firstSubmodule = createMockIdSubmodule('firstId', { id: { firstId: 'first' } });
+      const addedSubmodule = createMockIdSubmodule('addedId', { id: { addedId: 'added' } });
+      sinon.spy(firstSubmodule, 'getId');
+      sinon.spy(addedSubmodule, 'getId');
+      init(config);
+      setSubmoduleRegistry([firstSubmodule, addedSubmodule]);
+
+      config.setConfig({
+        userSync: {
+          auctionDelay: 10,
+          userIds: [{ name: 'firstId' }]
+        }
+      });
+      await getGlobal().getUserIdsAsync();
+
+      config.mergeConfig({
+        userSync: {
+          userIds: [{ name: 'addedId' }]
+        }
+      });
+
+      expect(await getGlobal().getUserIdsAsync()).to.deep.equal({
+        firstId: 'first',
+        addedId: 'added'
+      });
+      sinon.assert.calledOnce(firstSubmodule.getId);
+      sinon.assert.calledOnce(addedSubmodule.getId);
+    });
+
+    it('uses a stored ID when a submodule is added without autoRefresh', async function () {
+      const firstSubmodule = createMockIdSubmodule('firstId', { id: { firstId: 'first' } });
+      const addedSubmodule = createMockIdSubmodule('addedId', { id: { addedId: 'fetched' } });
+      sinon.spy(addedSubmodule, 'getId');
+      init(config);
+      setSubmoduleRegistry([firstSubmodule, addedSubmodule]);
+      config.setConfig({
+        userSync: {
+          auctionDelay: 10,
+          userIds: [{ name: 'firstId' }]
+        }
+      });
+      await getGlobal().getUserIdsAsync();
+
+      const expires = new Date(Date.now() + 10000).toUTCString();
+      coreStorage.setCookie('addedId', JSON.stringify({ addedId: 'stored' }), expires);
+      coreStorage.setCookie('addedId_cst', getConsentHash(), expires);
+      config.mergeConfig({
+        userSync: {
+          userIds: [{ name: 'addedId', storage: { name: 'addedId', type: 'cookie' } }]
+        }
+      });
+
+      expect(await getGlobal().getUserIdsAsync()).to.include({ addedId: 'stored' });
+      sinon.assert.notCalled(addedSubmodule.getId);
+      coreStorage.setCookie('addedId', '', EXPIRED_COOKIE_DATE);
+      coreStorage.setCookie('addedId_cst', '', EXPIRED_COOKIE_DATE);
+    });
+
+    it('does not refresh submodules retained from an earlier config when a later config adds others', async function () {
+      const retainedSubmodule = createMockIdSubmodule('retainedId', { id: { retainedId: 'retained' } });
+      const addedSubmodule = createMockIdSubmodule('addedId', { id: { addedId: 'added' } });
+      sinon.spy(retainedSubmodule, 'getId');
+      sinon.spy(addedSubmodule, 'getId');
+      init(config);
+      setSubmoduleRegistry([retainedSubmodule, addedSubmodule]);
+
+      config.setConfig({
+        userSync: {
+          autoRefresh: true,
+          auctionDelay: 10,
+          userIds: [{ name: 'retainedId' }]
+        }
+      });
+      await getGlobal().getUserIdsAsync();
+
+      // retainConfig defaults to true, so 'retainedId' is kept although this config does not list it
+      config.setConfig({
+        userSync: {
+          autoRefresh: true,
+          auctionDelay: 10,
+          userIds: [{ name: 'addedId' }]
+        }
+      });
+
+      expect(await getGlobal().getUserIdsAsync()).to.deep.equal({
+        retainedId: 'retained',
+        addedId: 'added'
+      });
+      sinon.assert.calledOnce(addedSubmodule.getId);
+      sinon.assert.calledOnce(retainedSubmodule.getId);
     });
 
     it('pbjs.getUserIds(Async) should prioritize user ids according to config available to core', () => {
@@ -986,12 +1351,12 @@ describe('User ID', function () {
         init(config);
         setSubmoduleRegistry([{
           name: 'mockId',
-          getId: function (_1, _2, storedId) {
+          getId: function (_1, _2, storedId, handle) {
             expect(storedId).to.not.exist;
             setVal('laterValue');
             return {
-              callback(_, readId) {
-                expect(readId()).to.eql('laterValue');
+              callback() {
+                expect(handle.get()).to.eql('laterValue');
                 done();
               }
             };
@@ -1014,6 +1379,264 @@ describe('User ID', function () {
             ]
           }
         });
+      });
+    });
+
+    describe('getId / extendId handle', () => {
+      const TEST_KEY = 'testStorageKey';
+      const read = (suffix = '') => coreStorage.getDataFromLocalStorage(TEST_KEY + suffix);
+
+      function reset() {
+        ['', '_exp', '_cst', '_last'].forEach(suffix => coreStorage.removeDataFromLocalStorage(TEST_KEY + suffix));
+      }
+
+      beforeEach(reset);
+      afterEach(reset);
+
+      function run(getId, stored) {
+        if (stored) {
+          coreStorage.setDataInLocalStorage(TEST_KEY, stored);
+          coreStorage.setDataInLocalStorage(TEST_KEY + '_exp', '');
+        }
+        init(config);
+        setSubmoduleRegistry([{
+          name: 'mockId',
+          getId,
+          decode: (value) => ({ mid: value })
+        }]);
+        config.setConfig({
+          userSync: {
+            auctionDelay: 10,
+            userIds: [{ name: 'mockId', storage: { type: 'html5', name: TEST_KEY, expires: 1 } }]
+          }
+        });
+        return getGlobal().getUserIdsAsync();
+      }
+
+      async function waitFor(condition) {
+        for (let i = 0; i < 100 && !condition(); i++) {
+          await new Promise((resolve) => setTimeout(resolve, 5));
+        }
+      }
+
+      const withCallback = (fn) => (config, consent, storedId, handle) => ({
+        callback: (setId) => fn(setId, handle)
+      });
+
+      describe('from the callback', () => {
+        it('should keep the current ID when setId is empty and storage was not used', async () => {
+          const ids = await run(withCallback((setId) => setId()), 'stored');
+          expect(ids).to.eql({ mid: 'stored' });
+          expect(read()).to.equal('stored');
+        });
+
+        it('should drop the ID from memory and storage on remove() and an empty setId', async () => {
+          const ids = await run(withCallback((setId, handle) => {
+            handle.remove();
+            setId();
+          }), 'stored');
+          expect(ids).to.eql({});
+          expect(read()).to.not.exist;
+        });
+
+        it('should not store the reported ID after touch(), but renew the bookkeeping', async () => {
+          const ids = await run(withCallback((setId, handle) => {
+            expect(handle.get()).to.equal('stored');
+            handle.touch();
+            setId('other');
+          }), 'stored');
+          expect(ids).to.eql({ mid: 'other' });
+          expect(read()).to.equal('stored');
+          expect(read('_cst')).to.exist;
+          expect(new Date(read('_exp')).getTime()).to.be.greaterThan(Date.now());
+        });
+
+        it('should store the value given to set()', async () => {
+          const ids = await run(withCallback((setId, handle) => {
+            handle.set('newValue');
+            setId('newValue');
+          }));
+          expect(ids).to.eql({ mid: 'newValue' });
+          expect(read()).to.equal('newValue');
+        });
+
+        it('should complete even when the reported ID cannot be stored', async () => {
+          sandbox.stub(utils, 'logError');
+          const circular = { id: 'value' };
+          circular.self = circular;
+          const ids = await Promise.race([
+            run(withCallback((setId) => setId(circular))),
+            new Promise((resolve, reject) => setTimeout(() => reject(new Error('getUserIdsAsync did not resolve')), 1000))
+          ]);
+          expect(ids.mid.id).to.equal('value');
+          expect(read()).to.not.exist;
+          sinon.assert.called(utils.logError);
+        });
+
+        it('should ignore storage calls made after setId, but apply later IDs', async () => {
+          const ids = await run(withCallback((setId, handle) => {
+            setId('fresh');
+            handle.remove();
+            setId('late');
+          }), 'stored');
+          expect(ids).to.eql({ mid: 'late' });
+          expect(read()).to.equal('late');
+          sinon.assert.calledWith(utils.logWarn, sinon.match('ignoring storage remove()'));
+        });
+
+        it('should count a submodule that calls setId twice as done once', async () => {
+          const OTHER_KEY = TEST_KEY + 'Other';
+          let otherSetId;
+          try {
+            init(config);
+            setSubmoduleRegistry([
+              {
+                name: 'mockId',
+                getId: () => ({ callback: (setId) => { setId('first'); setId('second'); } }),
+                decode: (value) => ({ mid: value })
+              },
+              {
+                name: 'otherId',
+                getId: () => ({ callback: (setId) => { otherSetId = setId; } }),
+                decode: (value) => ({ oid: value })
+              }
+            ]);
+            config.setConfig({
+              userSync: {
+                auctionDelay: 10,
+                userIds: [
+                  { name: 'mockId', storage: { type: 'html5', name: TEST_KEY, expires: 1 } },
+                  { name: 'otherId', storage: { type: 'html5', name: OTHER_KEY, expires: 1 } }
+                ]
+              }
+            });
+            let resolved = false;
+            const ids = getGlobal().getUserIdsAsync().then((ids) => { resolved = true; return ids; });
+            await waitFor(() => otherSetId != null);
+            await new Promise((resolve) => setTimeout(resolve, 20));
+            expect(resolved).to.be.false;
+            otherSetId('other');
+            expect(await ids).to.eql({ mid: 'second', oid: 'other' });
+          } finally {
+            ['', '_exp', '_cst', '_last'].forEach(suffix => coreStorage.removeDataFromLocalStorage(OTHER_KEY + suffix));
+          }
+        });
+      });
+
+      describe('from getId itself', () => {
+        it('should keep decoding the stored ID when getId returns nothing and storage was not used', async () => {
+          const ids = await run(() => undefined, 'stored');
+          expect(ids).to.eql({ mid: 'stored' });
+        });
+
+        it('should drop the stored ID on remove() and an empty response', async () => {
+          const ids = await run((config, consent, storedId, handle) => {
+            expect(storedId).to.equal('stored');
+            handle.remove();
+          }, 'stored');
+          expect(ids).to.eql({});
+          expect(read()).to.not.exist;
+        });
+
+        it('should neither store nor write anything after manage()', async () => {
+          const ids = await run((config, consent, storedId, handle) => {
+            handle.manage();
+            return { id: 'other' };
+          }, 'stored');
+          expect(ids).to.eql({ mid: 'other' });
+          expect(read()).to.equal('stored');
+          expect(read('_cst')).to.not.exist;
+        });
+
+        it('should clear the ID on manage() and an empty response', async () => {
+          const ids = await run((config, consent, storedId, handle) => {
+            handle.manage();
+          }, 'stored');
+          expect(ids).to.eql({});
+          expect(read()).to.equal('stored');
+        });
+
+        it('should not store the returned ID after touch()', async () => {
+          const ids = await run((config, consent, storedId, handle) => {
+            handle.touch();
+            return { id: 'other' };
+          }, 'stored');
+          expect(ids).to.eql({ mid: 'other' });
+          expect(read()).to.equal('stored');
+        });
+
+        it('should give the submodule storage access only', async () => {
+          let handle;
+          await run((config, consent, storedId, h) => { handle = h; });
+          expect(Object.keys(handle).sort()).to.eql(['get', 'manage', 'remove', 'set', 'touch']);
+        });
+      });
+
+      it('should still pass the stored value getter to the callback', async () => {
+        let getter;
+        coreStorage.setDataInLocalStorage(TEST_KEY + '_last', 'last-value');
+        await run(() => ({ callback: (setId, getStoredValue) => { getter = getStoredValue; setId(); } }), 'stored');
+        expect(getter()).to.equal('stored');
+        expect(getter('last')).to.equal('last-value');
+      });
+
+      it('should not write an html5 expiry on touch() when nothing is stored', async () => {
+        const ids = await run(withCallback((setId, handle) => {
+          handle.touch();
+          setId();
+        }));
+        expect(ids).to.eql({});
+        expect(read('_exp')).to.not.exist;
+      });
+
+      it('should read a value-less html5 expiry as nothing stored', async () => {
+        coreStorage.setDataInLocalStorage(TEST_KEY + '_exp', new Date(Date.now() + 60000).toUTCString());
+        let seen;
+        await run(withCallback((setId, handle) => {
+          seen = handle.get();
+          setId();
+        }));
+        expect(seen).to.be.undefined;
+      });
+
+      it('should not run a callback left by an invocation that a refresh replaced with one returning an ID', async () => {
+        const leftover = sinon.stub();
+        const getId = sinon.stub();
+        getId.onFirstCall().returns({ callback: leftover });
+        getId.returns({ id: 'fresh' });
+        init(config);
+        setSubmoduleRegistry([{ name: 'mockId', getId, decode: (value) => ({ mid: value }) }]);
+        config.setConfig({
+          userSync: {
+            // callbacks wait for the end of an auction, which never comes here
+            auctionDelay: 0,
+            userIds: [{ name: 'mockId', storage: { type: 'html5', name: TEST_KEY, expires: 1 } }]
+          }
+        });
+        await waitFor(() => getId.called);
+        sinon.assert.calledOnce(getId);
+        const ids = await Promise.race([
+          getGlobal().refreshUserIds(),
+          new Promise((resolve, reject) => setTimeout(() => reject(new Error('refreshUserIds did not resolve')), 1000))
+        ]);
+        expect(ids).to.eql({ mid: 'fresh' });
+        sinon.assert.notCalled(leftover);
+      });
+
+      it('should ignore an invocation superseded by a refresh', async () => {
+        const invocations = [];
+        run(withCallback((setId, handle) => {
+          invocations.push({ setId, handle });
+          if (invocations.length > 1) setId('current');
+        }), 'stored');
+        await waitFor(() => invocations.length > 0);
+        expect(invocations).to.have.length(1);
+        expect(await getGlobal().refreshUserIds()).to.eql({ mid: 'current' });
+        const [stale] = invocations;
+        stale.handle.remove();
+        stale.setId('stale');
+        expect(read()).to.equal('current');
+        expect(getGlobal().getUserIds()).to.eql({ mid: 'current' });
       });
     });
 
@@ -1071,7 +1694,7 @@ describe('User ID', function () {
         // ppid should NOT have been set
         expect(window.googletag._ppid).to.equal(undefined);
         // a warning should have been emmited
-        expect(utils.logWarn.args[0][0]).to.exist.and.to.contain('User ID - Googletag Publisher Provided ID for pubcid.org is not between 32 and 150 characters - pubcommonIdValue');
+        expect(utils.logWarn.args[0][0]).to.exist.and.to.contain("User ID - Googletag Publisher Provided ID for pubcid.org doesn't match the PPID requirements - pubcommonIdValue");
       });
     });
 
@@ -1179,6 +1802,53 @@ describe('User ID', function () {
         };
       });
 
+      it('should ignore a callback that completes after a refresh started a newer one', () => {
+        startInit();
+        const refreshedCallback = sinon.stub();
+        return clearStack().then(() => {
+          sinon.assert.calledOnce(mockIdCallback); // still pending
+          mockIdSystem.getId = sinon.stub().callsFake(() => ({ callback: refreshedCallback }));
+          getGlobal().refreshUserIds();
+          return clearStack();
+        }).then(() => {
+          refreshedCallback.callArg(0, { MOCKID: 'fresh' });
+          // the first callback completes late, with an older id
+          mockIdCallback.callArg(0, { MOCKID: 'stale' });
+          return clearStack();
+        }).then(() => {
+          expect(getGlobal().getUserIds().mid).to.equal('fresh');
+          expect(coreStorage.getCookie('MOCKID')).to.include('fresh');
+        });
+      });
+
+      it('should ignore a callback that completes after the ID system was reinitialized', () => {
+        startInit();
+        return clearStack().then(() => {
+          const lateCallback = mockIdCallback;
+          mockIdCallback = sinon.stub();
+          startInit();
+          lateCallback.callArg(0, { MOCKID: 'stale' });
+          return clearStack();
+        }).then(() => {
+          expect(coreStorage.getCookie('MOCKID')).to.not.be.ok;
+        });
+      });
+
+      it('should complete the batch when handling an asynchronous callback result throws', () => {
+        const logError = sinon.stub(utils, 'logError');
+        mockIdSystem.decode = () => { throw new Error('decode failed'); };
+        startInit();
+        let resolved = false;
+        return clearStack().then(() => {
+          getGlobal().getUserIdsAsync().then(() => { resolved = true; });
+          mockIdCallback.callArg(0, MOCK_ID);
+          return clearStack();
+        }).then(() => {
+          expect(resolved).to.be.true;
+          sinon.assert.called(logError);
+        }).finally(() => logError.restore());
+      });
+
       ['refreshUserIds', 'getUserIdsAsync'].forEach(method => {
         it(`should still resolve promises returned by ${method}`, () => {
           startInit();
@@ -1249,6 +1919,140 @@ describe('User ID', function () {
         clearStack().then(() => {
           // simulate init complete
           mockIdCallback.callArg(0, { id: { MOCKID: '1111' } });
+        });
+      });
+
+      it('should not release the auction when a filtered refresh cancels a pending submodule', () => {
+        // A refresh filtered by `submoduleNames` cancels the in-flight init and replaces
+        // it with a chain scoped to the named submodules. Submodules it did not name may
+        // still be fetching, and the auction must keep waiting for them.
+        startInit();
+        let auctionStarted = false;
+        // `mkDelay`, not `delay`: with the real one the 10ms `auctionDelay` timer wins
+        // the race on a slow browser and releases the auction before the assertion.
+        startAuctionHook(() => {
+          auctionStarted = true;
+        }, { adUnits: [getAdUnitMock()] }, { mkDelay: delay() });
+        return clearStack().then(() => {
+          // init has passed consent by now, so `initialized` is set and the refresh
+          // takes the cancel path; mockId's callback is still outstanding.
+          getGlobal().refreshUserIds({ submoduleNames: ['someOtherModule'] });
+          return clearStack();
+        }).then(() => {
+          expect(auctionStarted).to.be.false;
+          mockIdCallback.callArg(0, { id: { MOCKID: '1111' } });
+          return clearStack();
+        }).then(() => {
+          expect(auctionStarted).to.be.true;
+        });
+      });
+
+      it('should not keep waiting on a callback the refresh superseded without a new one', () => {
+        // mockId's first init leaves a callback outstanding that never fires. An
+        // unfiltered refresh whose getId returns an id and no callback supersedes
+        // that work, so `getUserIdsAsync` must stop waiting on the abandoned one:
+        // this is the escape from a stuck initialization that a forced refresh has
+        // always provided.
+        startInit();
+        let resolved = false;
+        return clearStack().then(() => {
+          mockIdSystem.getId = sinon.stub().callsFake(() => ({ id: { MOCKID: '2222' } }));
+          getGlobal().getUserIdsAsync().then(() => { resolved = true; });
+          return getGlobal().refreshUserIds().then(clearStack);
+        }).then(() => {
+          expect(resolved).to.be.true;
+          expect(getGlobal().getUserIds()).to.deep.equal({ mid: '2222' });
+        });
+      });
+
+      it('should still escape a stuck initialization through an unfiltered refresh', () => {
+        // mockId's callback never fires. An unfiltered refresh supersedes everything,
+        // so it must not inherit that wait: this is the escape hatch a forced refresh
+        // has always provided, and only the filtered path is being changed here.
+        startInit();
+        let resolved = false;
+        return clearStack().then(() => {
+          mockIdSystem.getId = sinon.stub().callsFake(() => ({ id: { MOCKID: '2222' } }));
+          getGlobal().getUserIdsAsync().then(() => { resolved = true; });
+          return getGlobal().refreshUserIds().then(clearStack);
+        }).then(() => {
+          expect(resolved).to.be.true;
+          expect(getGlobal().getUserIds()).to.deep.equal({ mid: '2222' });
+        });
+      });
+
+      describe('with a second submodule', () => {
+        let otherIdCallback;
+        let otherIdSystem;
+        let startBoth;
+
+        beforeEach(() => {
+          otherIdCallback = sinon.stub();
+          coreStorage.setCookie('OTHERID', '', EXPIRED_COOKIE_DATE);
+          otherIdSystem = {
+            name: 'otherId',
+            decode: (value) => ({ 'oid': value['OTHERID'] }),
+            getId: sinon.stub().callsFake(() => ({ callback: otherIdCallback }))
+          };
+          startBoth = () => {
+            init(config);
+            setSubmoduleRegistry([mockIdSystem, otherIdSystem]);
+            config.setConfig({
+              userSync: {
+                auctionDelay: 10,
+                userIds: [
+                  { name: 'mockId', storage: { name: 'MOCKID', type: 'cookie' } },
+                  { name: 'otherId', storage: { name: 'OTHERID', type: 'cookie' } }
+                ]
+              }
+            });
+          };
+        });
+
+        it('should wait for a batch started by an earlier filtered refresh', () => {
+          // Two filtered refreshes back to back. The second must not resolve while the
+          // callback the first one started is still outstanding, so the batch has to be
+          // registered when the refresh is issued rather than when its chain runs.
+          startBoth();
+          const refreshedMockCallback = sinon.stub();
+          let resolved = false;
+          return clearStack().then(() => {
+            mockIdCallback.callArg(0, { MOCKID: 'first' });
+            otherIdCallback.callArg(0, { OTHERID: 'first' });
+            return clearStack();
+          }).then(() => {
+            mockIdSystem.getId = sinon.stub().callsFake(() => ({ callback: refreshedMockCallback }));
+            otherIdSystem.getId = sinon.stub().callsFake(() => ({ id: { OTHERID: 'other' } }));
+            getGlobal().refreshUserIds({ submoduleNames: ['mockId'] });
+            getGlobal().refreshUserIds({ submoduleNames: ['otherId'] });
+            getGlobal().getUserIdsAsync().then(() => { resolved = true; });
+            return clearStack();
+          }).then(() => {
+            expect(resolved).to.be.false; // mockId's refreshed callback is still pending
+            refreshedMockCallback.callArg(0, { MOCKID: '2222' });
+            return clearStack();
+          }).then(() => {
+            expect(resolved).to.be.true;
+          });
+        });
+
+        it('should not inherit a stuck batch that an unfiltered refresh superseded', () => {
+          // mockId never calls back. An unfiltered refresh escapes it, and a filtered
+          // refresh afterwards must not pick the abandoned batch back up.
+          startBoth();
+          let resolved = false;
+          return clearStack().then(() => {
+            otherIdCallback.callArg(0, { OTHERID: 'first' });
+            mockIdSystem.getId = sinon.stub().callsFake(() => ({ id: { MOCKID: '2222' } }));
+            otherIdSystem.getId = sinon.stub().callsFake(() => ({ id: { OTHERID: 'other' } }));
+            return getGlobal().refreshUserIds().then(clearStack);
+          }).then(() => {
+            getGlobal().refreshUserIds({ submoduleNames: ['otherId'] });
+            getGlobal().getUserIdsAsync().then(() => { resolved = true; });
+            return clearStack();
+          }).then(() => {
+            expect(resolved).to.be.true;
+          });
         });
       });
 
@@ -1938,7 +2742,7 @@ describe('User ID', function () {
             uids: [{ id: 'testpubcid', atype: 1 }]
           }]);
         } finally {
-          coreStorage.setCookie('pubcid', '', EXPIRED_COOKIE_DATE);
+          eraseCookie('pubcid');
         }
       });
 
@@ -1980,7 +2784,7 @@ describe('User ID', function () {
             uids: [{ id: 'testpubcid', atype: 1 }]
           }]);
         } finally {
-          coreStorage.setCookie('pubcid', '', EXPIRED_COOKIE_DATE);
+          eraseCookie('pubcid');
           localStorage.removeItem('pubcid');
           localStorage.removeItem('pubcid_exp');
         }
@@ -2020,7 +2824,7 @@ describe('User ID', function () {
             uids: [{ id: 'testpubcid', atype: 1 }]
           }]);
         } finally {
-          coreStorage.setCookie('pubcid', '', EXPIRED_COOKIE_DATE);
+          eraseCookie('pubcid');
         }
       });
 
@@ -2288,13 +3092,13 @@ describe('User ID', function () {
         });
         sinon.stub(events, 'getEvents').returns([]);
         sinon.stub(utils, 'triggerPixel');
-        coreStorage.setCookie('pubcid', '', EXPIRED_COOKIE_DATE);
+        eraseCookie('pubcid');
       });
 
       afterEach(function () {
         events.getEvents.restore();
         utils.triggerPixel.restore();
-        coreStorage.setCookie('pubcid', '', EXPIRED_COOKIE_DATE);
+        eraseCookie('pubcid');
         resetConsentData();
         delete window.__tcfapi;
       });
@@ -2499,6 +3303,67 @@ describe('User ID', function () {
       });
     });
 
+    describe('refreshInSeconds with html5 storage and no previously stored "last" timestamp', function () {
+      let mockGetId;
+      let mockDecode;
+      let mockIdSystem;
+      const mockIdKey = 'MOCKID_HTML5';
+
+      beforeEach(function () {
+        mockGetId = sinon.stub();
+        mockDecode = sinon.stub();
+        mockIdSystem = {
+          name: 'mockIdHtml5',
+          getId: mockGetId,
+          decode: mockDecode
+        };
+
+        coreStorage.removeDataFromLocalStorage(mockIdKey);
+        coreStorage.removeDataFromLocalStorage(`${mockIdKey}_exp`);
+        coreStorage.removeDataFromLocalStorage(`${mockIdKey}_last`);
+        coreStorage.removeDataFromLocalStorage(`${mockIdKey}_cst`);
+        allConsent.reset();
+
+        init(config);
+        attachIdSystem(mockIdSystem);
+      });
+
+      afterEach(function () {
+        config.resetConfig();
+        coreStorage.removeDataFromLocalStorage(mockIdKey);
+        coreStorage.removeDataFromLocalStorage(`${mockIdKey}_exp`);
+        coreStorage.removeDataFromLocalStorage(`${mockIdKey}_last`);
+        coreStorage.removeDataFromLocalStorage(`${mockIdKey}_cst`);
+      });
+
+      it('treats a stored id with no "_last" entry as due for refresh, not as never-refreshable', function () {
+        // simulates an id that was stored before `refreshInSeconds` was configured (or otherwise
+        // never recorded a last-refresh time): the id and its expiry exist, but "_last" does not.
+        coreStorage.setDataInLocalStorage(mockIdKey, JSON.stringify({ id: '1234' }));
+        coreStorage.setDataInLocalStorage(`${mockIdKey}_exp`, new Date(Date.now() + 60000).toUTCString());
+        coreStorage.setDataInLocalStorage(`${mockIdKey}_cst`, getConsentHash());
+
+        config.setConfig({
+          userSync: {
+            userIds: [{
+              name: 'mockIdHtml5',
+              storage: {
+                name: mockIdKey,
+                type: 'html5',
+                refreshInSeconds: 30
+              }
+            }],
+            auctionDelay: 5
+          }
+        });
+
+        return runBidsHook((config) => {
+        }, { adUnits }).then(() => {
+          sinon.assert.calledOnce(mockGetId);
+        });
+      });
+    });
+
     describe('requestDataDeletion', () => {
       function idMod(name, value) {
         return {
@@ -2570,6 +3435,45 @@ describe('User ID', function () {
             sinon.assert.calledWith(next, arg);
           });
         });
+      });
+
+      it('passes the latest IDs of submodules retained from an earlier config', async function () {
+        let completeCallback, callbackStarted;
+        const started = new Promise((resolve) => { callbackStarted = resolve; });
+        const retainedSubmodule = {
+          ...createMockIdSubmodule('retainedId'),
+          getId() {
+            return {
+              callback(done) {
+                completeCallback = done;
+                callbackStarted();
+              }
+            };
+          },
+          onDataDeletionRequest: sinon.stub()
+        };
+        init(config);
+        setSubmoduleRegistry([retainedSubmodule, createMockIdSubmodule('addedId', { id: { addedId: 'added' } })]);
+        config.setConfig({
+          userSync: {
+            auctionDelay: 10,
+            userIds: [{ name: 'retainedId' }]
+          }
+        });
+        await started;
+
+        // retainConfig defaults to true, so 'retainedId' is kept while its callback is still pending
+        config.setConfig({
+          userSync: {
+            auctionDelay: 10,
+            userIds: [{ name: 'addedId' }]
+          }
+        });
+        completeCallback({ retainedId: 'retained' });
+        expect(await getGlobal().getUserIdsAsync()).to.include({ retainedId: 'retained' });
+
+        requestDataDeletion(sinon.stub());
+        sinon.assert.calledWith(retainedSubmodule.onDataDeletionRequest, sinon.match({ name: 'retainedId' }), { retainedId: 'retained' });
       });
     });
   });
@@ -2918,6 +3822,36 @@ describe('User ID', function () {
           mockId1: 'mockId1Module'
         }));
       });
+    });
+
+    it('should log, not throw, when a module with several IDs does not declare primaryIds', () => {
+      // a distinct name: the registry keeps the first module registered under a name
+      const withoutPrimaryIds = { ...mockIdSubmodule('mockId2', 'mockId3'), name: 'noPrimaryIdsModule' };
+      delete withoutPrimaryIds.primaryIds;
+      // logError emits AUCTION_DEBUG; listening there works whichever module calls it
+      const errors = [];
+      const onDebug = (event) => { if (event.type === 'ERROR') errors.push(event.arguments.join(' ')); };
+      events.on(EVENTS.AUCTION_DEBUG, onDebug);
+      setSubmoduleRegistry([mockIdSubmodule('mockId1'), withoutPrimaryIds]);
+      config.setConfig({
+        userSync: {
+          userIds: [
+            { name: 'mockId1Module' },
+            { name: 'noPrimaryIdsModule' },
+          ]
+        }
+      });
+      return enrich()
+        .then(({ global }) => {
+          expect(global.user.ext.eids.map(eid => eid.source)).to.have.members(['mockId1.com', 'mockId2.com', 'mockId3.com']);
+          return getGlobal().refreshUserIds();
+        })
+        .then(() => {
+          const reports = errors.filter(message => message.includes("does not specify 'primaryIds'"));
+          expect(reports).to.have.length(1);
+          expect(reports[0]).to.include('noPrimaryIdsModule');
+        })
+        .finally(() => events.off(EVENTS.AUCTION_DEBUG, onDebug));
     });
 
     it('should not choke if no id is available for a module', () => {
@@ -3310,6 +4244,8 @@ describe('User ID', function () {
       const result = generateSubmoduleContainers({}, configRegistry, previousSubmoduleContainers, submoduleRegistry);
       expect(result).to.have.lengthOf(1);
       expect(result[0].submodule.name).to.eql('sharedId');
+      expect(result[0].new).to.be.true;
+      expect(result[0].dirty).to.be.true;
     });
 
     it('should properly map registry to submodule containers for non-empty previous submodule containers', () => {
@@ -3326,6 +4262,8 @@ describe('User ID', function () {
       const result = generateSubmoduleContainers({}, configRegistry, previousSubmoduleContainers, submoduleRegistry);
       expect(result).to.have.lengthOf(1);
       expect(result[0].submodule.name).to.eql('sharedId');
+      expect(result[0].new).to.be.true;
+      expect(result[0].dirty).to.be.true;
     });
 
     it('should properly map registry to submodule containers for retainConfig flag', () => {
@@ -3340,10 +4278,14 @@ describe('User ID', function () {
       const result = generateSubmoduleContainers({ retainConfig: true }, configRegistry, previousSubmoduleContainers, submoduleRegistry);
       expect(result).to.have.lengthOf(2);
       expect(result[0].submodule.name).to.eql('sharedId');
+      expect(result[0].new).to.be.true;
+      expect(result[0].dirty).to.be.true;
       expect(result[1].submodule.name).to.eql('shouldBeKept');
+      expect(result[1].new).to.be.false;
+      expect(result[1].dirty).to.be.false;
     });
 
-    it('should properly map registry to submodule containers for autoRefresh flag', () => {
+    it('should mark modules whose configuration has changed', () => {
       const previousSubmoduleContainers = [
         { submodule: { name: 'modified' }, config: { name: 'modified', auctionDelay: 300 } },
         { submodule: { name: 'unchanged' }, config: { name: 'unchanged', auctionDelay: 300 } },
@@ -3358,17 +4300,29 @@ describe('User ID', function () {
         { name: 'new' },
         { name: 'unchanged', auctionDelay: 300 },
       ];
-      const result = generateSubmoduleContainers({ autoRefresh: true }, configRegistry, previousSubmoduleContainers, submoduleRegistry);
-      expect(result).to.have.lengthOf(3);
-      const itemsWithRefreshIds = result.filter(item => item.refreshIds);
-      const submoduleNames = itemsWithRefreshIds.map(item => item.submodule.name);
-      expect(submoduleNames).to.deep.eql(['modified', 'new']);
+      const result = Object.fromEntries(
+        generateSubmoduleContainers({ autoRefresh: true }, configRegistry, previousSubmoduleContainers, submoduleRegistry)
+          .map(item => [item.submodule.name, item])
+      );
+      sinon.assert.match(result.modified, {
+        dirty: true,
+        new: false,
+      });
+      sinon.assert.match(result.new, {
+        new: true,
+        dirty: true,
+      });
+      sinon.assert.match(result.unchanged, {
+        dirty: false,
+        new: false,
+      });
     });
   });
   describe('user id modules - enforceStorageType', () => {
     let warnLogSpy;
     const UID_MODULE_NAME = 'userIdModule';
     const cookieName = 'testCookie';
+    const localStorageKey = 'testLocalStorageKey';
     const userSync = {
       userIds: [
         {
@@ -3394,6 +4348,7 @@ describe('User ID', function () {
     afterEach(() => {
       warnLogSpy.restore();
       getCoreStorageManager('test').setCookie(cookieName, '', EXPIRED_COOKIE_DATE);
+      getCoreStorageManager('test').removeDataFromLocalStorage(localStorageKey);
     });
 
     it('should not warn when reading', () => {
@@ -3421,6 +4376,46 @@ describe('User ID', function () {
       const storage = getStorageManager({ moduleType: MODULE_TYPE_UID, moduleName: UID_MODULE_NAME });
       storage.setCookie(cookieName, 'value', 20000);
       expect(storage.getCookie(cookieName)).to.not.exist;
+    });
+
+    [
+      `${STORAGE_TYPE_COOKIES}&${STORAGE_TYPE_LOCALSTORAGE}`,
+      `${STORAGE_TYPE_LOCALSTORAGE}&${STORAGE_TYPE_COOKIES}`
+    ].forEach(storageType => {
+      describe(`with storage type '${storageType}'`, () => {
+        const userIds = [
+          {
+            name: UID_MODULE_NAME,
+            storage: {
+              type: storageType,
+              name: 'storageName'
+            }
+          }
+        ];
+
+        Object.entries({
+          'unset': {},
+          'set to true': { enforceStorageType: true }
+        }).forEach(([desc, enforceConfig]) => {
+          it(`should allow userId module to store data in cookies and local storage without warning for enforceStorageType ${desc}`, () => {
+            config.setConfig({ userSync: { ...enforceConfig, userIds } });
+            const storage = getStorageManager({ moduleType: MODULE_TYPE_UID, moduleName: UID_MODULE_NAME });
+            storage.setCookie(cookieName, 'value', 20000);
+            storage.setDataInLocalStorage(localStorageKey, 'value');
+            expect(storage.getCookie(cookieName)).to.eql('value');
+            expect(storage.getDataFromLocalStorage(localStorageKey)).to.eql('value');
+            sinon.assert.notCalled(warnLogSpy);
+          });
+        });
+
+        it('should not allow userId module to store data in a storage type that is not listed for enforceStorageType set to true', () => {
+          config.setConfig({ userSync: { enforceStorageType: true, userIds } });
+          expect(isActivityAllowed(ACTIVITY_ACCESS_DEVICE, activityParams(MODULE_TYPE_UID, UID_MODULE_NAME, {
+            [ACTIVITY_PARAM_STORAGE_TYPE]: 'unlisted',
+            [ACTIVITY_PARAM_STORAGE_WRITE]: true
+          }))).to.be.false;
+        });
+      });
     });
   });
 });

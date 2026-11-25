@@ -36,6 +36,7 @@ import { getGlobalVarName } from '../src/buildOptions.js';
 /**
  * @typedef {import('../modules/rtdModule/index.js').RtdSubmodule} RtdSubmodule
  * @typedef {import('../modules/rtdModule/index.js').adUnit} adUnit
+ * @typedef {import('./adagioRtdProvider.d.ts').AdagioRtdProviderParams} AdagioRtdProviderParams
  */
 const SUBMODULE_NAME = 'adagio';
 const ADAGIO_BIDDER_CODE = 'adagio';
@@ -538,8 +539,7 @@ function getSlotPosition(divId) {
       const body = d.body;
       const clientTop = d.clientTop || body.clientTop || 0;
       const clientLeft = d.clientLeft || body.clientLeft || 0;
-      const scrollTop = wt.pageYOffset || windowDimensions.document.documentElement.scrollTop || windowDimensions.document.body.scrollTop;
-      const scrollLeft = wt.pageXOffset || windowDimensions.document.documentElement.scrollLeft || windowDimensions.document.body.scrollLeft;
+      const { scrollY: scrollTop, scrollX: scrollLeft } = windowDimensions;
 
       const elComputedStyle = wt.getComputedStyle(domElement, null);
       const mustDisplayElement = elComputedStyle.display === 'none';

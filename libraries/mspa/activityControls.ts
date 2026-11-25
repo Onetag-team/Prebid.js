@@ -8,6 +8,8 @@ import {
 } from '../../src/activities/activities.js';
 import { gppDataHandler } from '../../src/adapterManager.js';
 import { logInfo } from '../../src/utils.js';
+import type { GPPConsentData } from '../../src/types/consent/gpp.d.ts';
+import type { Activity } from '../../src/activities/activities.ts';
 
 export interface MSPAConfig {
   /**
@@ -19,6 +21,11 @@ export interface MSPAConfig {
   restrictActivities?: string[]
 }
 
+/**
+ * These options live under the GPP consent module's configuration, so they only mean anything to a
+ * publisher who has included that module: the augmentation is meant to apply only then.
+ * @augmentationOptional
+ */
 declare module '../../modules/consentManagementGpp' {
   interface GPPConfig {
     mspa?: MSPAConfig;
@@ -156,12 +163,12 @@ export function getRules(restrictActivities) {
   return Object.assign(Object.fromEntries((restrictActivities ?? []).map(activity => [activity, isConsentDenied])), CONSENT_RULES);
 }
 
-export function setupRules(api, sids, rules = CONSENT_RULES, normalizeConsent = (c) => c, registerRule = registerActivityControl, getConsentData = () => gppDataHandler.getConsentData()) {
+export function setupRules(api, sids, rules = CONSENT_RULES, normalizeConsent = (c) => c, registerRule = registerActivityControl, getConsentData: () => GPPConsentData = () => gppDataHandler.getConsentData()) {
   const unreg = [];
   const ruleName = `MSPA (GPP '${api}' for section${sids.length > 1 ? 's' : ''} ${sids.join(', ')})`;
   logInfo(`Enabling activity controls for ${ruleName}`);
   Object.entries(rules).forEach(([activity, denies]) => {
-    unreg.push(registerRule(activity, ruleName, mspaRule(
+    unreg.push(registerRule(activity as Activity, ruleName, mspaRule(
       sids,
       () => normalizeConsent(flatSection(getConsentData()?.parsedSections?.[api])),
       denies,

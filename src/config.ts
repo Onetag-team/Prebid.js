@@ -9,6 +9,7 @@ import {
   getParameterByName,
   isArray,
   isBoolean,
+  isFn,
   isPlainObject,
   isStr,
   logError,
@@ -20,8 +21,9 @@ import { DEBUG_MODE } from './constants.js';
 import type { UserSyncConfig } from "./userSync.ts";
 import type { DeepPartial, DeepProperty, DeepPropertyName, TypeOfDeepProperty } from "./types/objects.d.ts";
 import type { BidderCode } from "./types/common.d.ts";
+import type { GptSlot } from "./types/gpt.d.ts";
 import type { ORTBRequest } from "./types/ortb/request.d.ts";
-import { Bid } from './bidfactory.ts';
+import type { Bid } from './bidfactory.ts';
 
 const DEFAULT_DEBUG = getParameterByName(DEBUG_MODE).toUpperCase() === 'TRUE';
 const DEFAULT_BIDDER_TIMEOUT = 3000;
@@ -64,9 +66,11 @@ function attachProperties(config, useDefaultValues = true) {
   } : {};
 
   const validateauctionOptions = (() => {
-    const boolKeys = ['suppressStaleRender', 'suppressExpiredRender', 'legacyRender', 'rejectUnknownMediaTypes', 'rejectInvalidMediaTypes'];
+    const boolKeys = ['suppressStaleRender', 'suppressExpiredRender', 'legacyRender', 'rejectUnknownMediaTypes', 'rejectInvalidMediaTypes', 'yield'];
     const arrKeys = ['secondaryBidders'];
-    const allKeys = [].concat(boolKeys).concat(arrKeys);
+    const fnKeys = ['replaceExpiredBid'];
+    const enumKeys = { viewabilityMeasurement: ['observer', 'boundingBox'] };
+    const allKeys = [].concat(boolKeys).concat(arrKeys).concat(fnKeys).concat(Object.keys(enumKeys));
 
     return function validateauctionOptions(val) {
       if (!isPlainObject(val)) {
@@ -90,6 +94,16 @@ function attachProperties(config, useDefaultValues = true) {
         } else if (boolKeys.includes(k)) {
           if (!isBoolean(val[k])) {
             logWarn(`Auction Options ${k} must be of type boolean`);
+            return false;
+          }
+        } else if (fnKeys.includes(k)) {
+          if (!isFn(val[k])) {
+            logWarn(`Auction Options ${k} must be a function`);
+            return false;
+          }
+        } else if (enumKeys.hasOwnProperty(k)) {
+          if (!enumKeys[k].includes(val[k])) {
+            logWarn(`Auction Options ${k} must be one of: ${enumKeys[k].join(', ')}`);
             return false;
           }
         }
@@ -201,7 +215,8 @@ function attachProperties(config, useDefaultValues = true) {
   }
 }
 
-export interface Config {
+/** P is inferred by the setters to keep each provider's configuration tied to its name. */
+export interface Config<P extends string = string> {
   /**
    * Enable debug mode. In debug mode, Prebid.js will post additional messages to the browser console and cause
    * Prebid Server to return additional information in its response.
@@ -251,7 +266,7 @@ export interface Config {
    * The default maxBid value is 5000.
    */
   maxBid?: number;
-  userSync?: UserSyncConfig;
+  userSync?: UserSyncConfig<P>;
   /**
    * Set the order in which bidders are called.
    */
@@ -279,7 +294,7 @@ export interface Config {
   /**
    * Customize how a GPT slot is matched to an ad unit code during targeting.
    */
-  customGptSlotMatching?: (slot: googletag.Slot) => ((adUnitCode: string) => boolean) | undefined;
+  customGptSlotMatching?: (slot: GptSlot) => ((adUnitCode: string) => boolean) | undefined;
   /**
    * List of fingerprinting APIs to disable. When an API is listed, the corresponding library
    * returns a safe default instead of reading the real value. Supported: 'devicepixelratio', 'webdriver', 'resolvedoptions'.
@@ -287,10 +302,10 @@ export interface Config {
   disableFingerprintingApis?: Array<'devicepixelratio' | 'webdriver' | 'resolvedoptions'>;
 }
 
-type PartialConfig = Partial<Config> & { [setting: string]: unknown };
-type BidderConfig = {
+type PartialConfig<P extends string = string> = Partial<Config<P>> & { [setting: string]: unknown };
+type BidderConfig<P extends string = string> = {
   bidders: BidderCode[];
-  config: PartialConfig;
+  config: PartialConfig<P>;
 };
 
 type TopicalConfig<S extends string> = { [K in DeepPropertyName<S>]: S extends DeepProperty<Config> ? TypeOfDeepProperty<Config, S> : unknown };
@@ -393,7 +408,7 @@ export function newConfig() {
     const conf = _getConfig();
     Object.defineProperty(conf, 'ortb2', {
       get: function () {
-        throw new Error('invalid access to \'orbt2\' config - use request parameters instead');
+        throw new Error('invalid access to \'ortb2\' config - use request parameters instead');
       }
     });
     return conf;
@@ -441,7 +456,7 @@ export function newConfig() {
   /*
    * Set configuration.
    */
-  function setConfig(options: PartialConfig) {
+  function setConfig<const P extends string>(options: PartialConfig<P>) {
     if (!isPlainObject(options)) {
       logError('setConfig options must be an object');
       return;
@@ -559,7 +574,7 @@ export function newConfig() {
       .forEach(listener => listener.callback(options));
   }
 
-  function setBidderConfig(config: BidderConfig, mergeFlag = false) {
+  function setBidderConfig<const P extends string>(config: BidderConfig<P>, mergeFlag = false) {
     try {
       check(config);
       config.bidders.forEach(bidder => {
@@ -594,7 +609,7 @@ export function newConfig() {
     }
   }
 
-  function mergeConfig(config: PartialConfig) {
+  function mergeConfig<const P extends string>(config: PartialConfig<P>) {
     if (!isPlainObject(config)) {
       logError('mergeConfig input must be an object');
       return;
@@ -612,7 +627,7 @@ export function newConfig() {
     return mergedConfig;
   }
 
-  function mergeBidderConfig(config: BidderConfig) {
+  function mergeBidderConfig<const P extends string>(config: BidderConfig<P>) {
     return setBidderConfig(config, true);
   }
 
@@ -620,11 +635,12 @@ export function newConfig() {
    * Internal functions for core to execute some synchronous code while having an active bidder set.
    */
   function runWithBidder(bidder, fn) {
+    const prevBidder = currBidder;
     currBidder = bidder;
     try {
       return fn();
     } finally {
-      resetBidder();
+      currBidder = prevBidder;
     }
   }
   function callbackWithBidder(bidder) {

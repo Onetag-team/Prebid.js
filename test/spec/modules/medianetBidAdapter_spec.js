@@ -4,7 +4,7 @@ import { POST_ENDPOINT } from '../../../libraries/medianetUtils/constants.js';
 import { makeSlot } from '../integration/faker/googletag.js';
 import { config } from '../../../src/config.js';
 import { server } from '../../mocks/xhr.js';
-import { resetWinDimensions } from '../../../src/utils.js';
+import { deepClone, resetWinDimensions } from '../../../src/utils.js';
 import { getGlobal } from '../../../src/prebidGlobal.js';
 import * as adUnits from 'src/utils/adUnits';
 
@@ -808,9 +808,6 @@ const VALID_PAYLOAD_WITH_USERID = {
     'customer_id': 'customer_id',
     'prebid_version': 'v' + '$prebid.version$',
     'gdpr_applies': false,
-    'user_id': {
-      britepoolid: '82efd5e1-816b-4f87-97f8-044f407e2911'
-    },
     'usp_applies': false,
     'coppa_applies': false,
     'screen': {
@@ -1799,14 +1796,13 @@ describe('Media.net bid adapter', function () {
     });
 
     it('should have valid crid present in bid request', function() {
-      sandbox.stub(config, 'getConfig').callsFake((key) => {
-        const config = {
-          'coppa': true
-        };
-        return config[key];
+      const bidreq = spec.buildRequests(VALID_BID_REQUEST_WITH_CRID, {
+        ...VALID_AUCTIONDATA,
+        ortb2: { regs: { coppa: 1 } }
       });
-      const bidreq = spec.buildRequests(VALID_BID_REQUEST_WITH_CRID, VALID_AUCTIONDATA);
-      expect(JSON.parse(bidreq.data)).to.deep.equal(VALID_PAYLOAD_WITH_CRID);
+      const expectedPayload = deepClone(VALID_PAYLOAD_WITH_CRID);
+      expectedPayload.ortb2.regs = { coppa: 1 };
+      expect(JSON.parse(bidreq.data)).to.deep.equal(expectedPayload);
     });
 
     it('should have valid ortb2Imp param present in bid request', function() {
@@ -1820,7 +1816,7 @@ describe('Media.net bid adapter', function () {
       expect(actual).to.deep.equal(VALID_BID_REQUEST[0].ortb2Imp);
     });
 
-    it('should have userid in bid request', function () {
+    it('should not send a raw bid.userId as user_id', function () {
       const bidReq = spec.buildRequests(VALID_BID_REQUEST_WITH_USERID, VALID_AUCTIONDATA);
       expect(JSON.parse(bidReq.data)).to.deep.equal(VALID_PAYLOAD_WITH_USERID);
     });

@@ -215,13 +215,34 @@ describe('Deepintent adapter', function () {
       expect(bRequest.options.contentType).to.equal('application/json');
     });
     it('bid request check : Device', function () {
-      const bRequest = spec.buildRequests(request);
+      const bidderReq = {
+        ortb2: {
+          device: {
+            ua: 'test-user-agent',
+            w: 1024,
+            h: 768,
+            language: 'en'
+          }
+        }
+      };
+      const bRequest = spec.buildRequests(request, bidderReq);
       const data = JSON.parse(bRequest.data);
-      expect(data.device.ua).to.be.a('string');
+      expect(data.device.ua).to.equal('test-user-agent');
       expect(data.device.js).to.equal(1);
       expect(data.device.dnt).to.be.a('number');
-      expect(data.device.h).to.be.a('number');
-      expect(data.device.w).to.be.a('number');
+      expect(data.device.h).to.equal(768);
+      expect(data.device.w).to.equal(1024);
+      expect(data.device.language).to.equal('en');
+    });
+    it('bid request check : Device is not read from navigator/screen when ortb2.device is absent', function () {
+      const bRequest = spec.buildRequests(request, {});
+      const data = JSON.parse(bRequest.data);
+      expect(data.device.ua).to.be.undefined;
+      expect(data.device.h).to.be.undefined;
+      expect(data.device.w).to.be.undefined;
+      expect(data.device.language).to.be.undefined;
+      expect(data.device.js).to.equal(1);
+      expect(data.device.dnt).to.be.a('number');
     });
     it('bid request check : Impression', function () {
       const bRequest = spec.buildRequests(request);
@@ -552,5 +573,12 @@ describe('Deepintent adapter', function () {
       expect(data.imp[0].pmp.deals[0].id).to.equal('deal1234');
       expect(data.imp[0].ext.key_val).to.equal('key1=val1|key2=val2');
     });
+  });
+});
+
+describe('deepintentBidAdapter consent IDs', function () {
+  it('declares its Google Additional Consent provider ID', function () {
+    expect(spec.acpId).to.equal(2320);
+    expect(spec.gvlid).to.be.undefined;
   });
 });

@@ -4,10 +4,11 @@ import { BANNER, VIDEO } from '../src/mediaTypes.js';
 import { COMMON_ORTB_VIDEO_PARAMS, formatResponse } from '../libraries/deepintentUtils/index.js';
 import { addDealCustomTargetings, addPMPDeals } from '../libraries/dealUtils/dealUtils.js';
 import { getDNT } from '../libraries/dnt/index.js';
+import { buildOrtbVideo } from '../libraries/ortbVideoUtils/ortbVideoUtils.js';
 
 const LOG_WARN_PREFIX = 'DeepIntent: ';
 const BIDDER_CODE = 'deepintent';
-const GVL_ID = 541;
+const ACP_ID = 2320; // Google Additional Consent provider ID
 const BIDDER_ENDPOINT = 'https://prebid.deepintent.com/prebid';
 const USER_SYNC_URL = 'https://cdn.deepintent.com/syncpixel.html';
 const DI_M_V = '1.0.0';
@@ -19,7 +20,7 @@ export const ORTB_VIDEO_PARAMS = {
 };
 export const spec = {
   code: BIDDER_CODE,
-  gvlid: GVL_ID,
+  acpId: ACP_ID,
   supportedMediaTypes: [BANNER, VIDEO],
   aliases: [],
 
@@ -71,7 +72,7 @@ export const spec = {
       at: 1,
       imp: validBidRequests.map(bid => buildImpression(bid)),
       site: buildSite(bidderRequest),
-      device: buildDevice(),
+      device: buildDevice(bidderRequest),
       user: user && user.length === 1 ? user[0] : {}
     };
 
@@ -196,34 +197,9 @@ function getFloor(bidRequest) {
 }
 
 function _buildVideo(bid) {
-  const videoObj = {};
-  const videoAdUnitParams = deepAccess(bid, 'mediaTypes.video', {});
-  const videoBidderParams = deepAccess(bid, 'params.video', {});
-  const computedParams = {};
-
-  if (Array.isArray(videoAdUnitParams.playerSize)) {
-    const tempSize = (Array.isArray(videoAdUnitParams.playerSize[0])) ? videoAdUnitParams.playerSize[0] : videoAdUnitParams.playerSize;
-    computedParams.w = tempSize[0];
-    computedParams.h = tempSize[1];
-  }
-
-  const videoParams = {
-    ...computedParams,
-    ...videoAdUnitParams,
-    ...videoBidderParams
-  };
-
-  Object.keys(ORTB_VIDEO_PARAMS).forEach(paramName => {
-    if (videoParams.hasOwnProperty(paramName)) {
-      if (ORTB_VIDEO_PARAMS[paramName](videoParams[paramName])) {
-        videoObj[paramName] = videoParams[paramName];
-      } else {
-        logWarn(`The OpenRTB video param ${paramName} has been skipped due to misformating. Please refer to OpenRTB 2.5 spec.`);
-      }
-    }
+  return buildOrtbVideo(bid, ORTB_VIDEO_PARAMS, (paramName) => {
+    logWarn(`The OpenRTB video param ${paramName} has been skipped due to misformating. Please refer to OpenRTB 2.5 spec.`);
   });
-
-  return videoObj;
 };
 
 function buildCustomParams(bid) {
@@ -288,14 +264,16 @@ function buildSite(bidderRequest) {
   return site;
 }
 
-function buildDevice() {
+function buildDevice(bidderRequest) {
+  // core FPD enrichment already fills ortb2.device from the browser (ua, w, h, language);
+  // read it from the request rather than from navigator/screen directly
   return {
-    ua: navigator.userAgent,
+    ua: deepAccess(bidderRequest, 'ortb2.device.ua'),
     js: 1,
     dnt: getDNT() ? 1 : 0,
-    h: screen.height,
-    w: screen.width,
-    language: navigator.language
+    h: deepAccess(bidderRequest, 'ortb2.device.h'),
+    w: deepAccess(bidderRequest, 'ortb2.device.w'),
+    language: deepAccess(bidderRequest, 'ortb2.device.language')
   };
 }
 

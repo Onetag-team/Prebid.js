@@ -10,6 +10,7 @@
       "adriverIdSystem",
       "adtelligentIdSystem",
       "amxIdSystem",
+      "anonymisedIdSystem",
       "ceeIdSystem",
       "connectIdSystem",
       "criteoIdSystem",
@@ -29,6 +30,7 @@
       "idxIdSystem",
       "imuIdSystem",
       "intentIqIdSystem",
+      "jixieIdSystem",
       "justIdSystem",
       "kinessoIdSystem",
       "liveIntentIdSystem",
@@ -53,6 +55,7 @@
       "pubmaticIdSystem",
       "rediadsIdSystem",
       "rewardedInterestIdSystem",
+      "sevioIdSystem",
       "sharedIdSystem",
       "startioIdSystem",
       "taboolaIdSystem",
@@ -63,7 +66,6 @@
       "unifiedIdSystem",
       "utiqIdSystem",
       "utiqMtpIdSystem",
-      "verizonMediaIdSystem",
       "yandexIdSystem",
       "zeotapIdPlusIdSystem"
     ],
@@ -78,7 +80,6 @@
       "adnuntiusRtdProvider",
       "agenticAudienceRtdProvider",
       "airgridRtdProvider",
-      "akamaiDapRtdProvider",
       "anonymisedRtdProvider",
       "arcspanRtdProvider",
       "azerionedgeRtdProvider",
@@ -100,13 +101,14 @@
       "greenbidsRtdProvider",
       "growthCodeRtdProvider",
       "hadronRtdProvider",
+      "humansecurityMalvDefenseRtdProvider",
       "humansecurityRtdProvider",
       "iasRtdProvider",
       "insuradsRtdProvider",
       "imRtdProvider",
-      "intersectionRtdProvider",
       "jwplayerRtdProvider",
       "liveIntentRtdProvider",
+      "mantisRtdProvider",
       "mediafilterRtdProvider",
       "medianetRtdProvider",
       "mgidRtdProvider",
@@ -134,6 +136,7 @@
       "sirdataRtdProvider",
       "symitriDapRtdProvider",
       "timeoutRtdProvider",
+      "transfonSecurityRtdProvider",
       "weboramaRtdProvider",
       "wurflRtdProvider",
       "encypherRtdProvider",
@@ -147,6 +150,9 @@
       "jwplayerVideoProvider",
       "videojsVideoProvider",
       "adplayerproVideoProvider"
+    ],
+    "genericAnalyticsAdapter": [
+      "genericAnalyticsSkinnyEvents"
     ]
   }
 }

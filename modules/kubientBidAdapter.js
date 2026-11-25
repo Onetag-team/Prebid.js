@@ -2,13 +2,16 @@ import { isArray, deepAccess, isPlainObject } from '../src/utils.js';
 import { registerBidder } from '../src/adapters/bidderFactory.js';
 import { BANNER, VIDEO } from '../src/mediaTypes.js';
 import { config } from '../src/config.js';
+import { coppaDataHandler } from '../src/consentHandler.js';
 
 const BIDDER_CODE = 'kubient';
+const ACP_ID = 3177; // Google Additional Consent provider ID
 const END_POINT = 'https://kssp.kbntx.ch/kubprebidjs';
 const VERSION = '1.1';
 const VENDOR_ID = 794;
 export const spec = {
   code: BIDDER_CODE,
+  acpId: ACP_ID,
   supportedMediaTypes: [BANNER, VIDEO],
   isBidRequestValid: function (bid) {
     return !!(
@@ -63,7 +66,7 @@ export const spec = {
         uspConsent: bidderRequest.uspConsent
       };
 
-      if (config.getConfig('coppa') === true) {
+      if ((bidderRequest?.ortb2?.regs?.coppa === 1 || coppaDataHandler.getCoppa())) {
         data.coppa = 1;
       }
 

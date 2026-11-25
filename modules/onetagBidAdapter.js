@@ -5,19 +5,21 @@ import { INSTREAM, OUTSTREAM } from '../src/video.js';
 import { Renderer } from '../src/Renderer.js';
 import { getStorageManager } from '../src/storageManager.js';
 import { registerBidder } from '../src/adapters/bidderFactory.js';
+import { ajax } from '../src/ajax.js';
 import { deepClone, logError, deepAccess, getWinDimensions } from '../src/utils.js';
 import { getBoundingClientRect } from '../libraries/boundingClientRect/boundingClientRect.js';
-import { toOrtbNativeRequest } from '../src/native.js';
 import { getConnectionInfo } from '../libraries/connectionInfo/connectionUtils.js';
 import { getAdUnitElement } from '../src/utils/adUnits.js';
 
 /**
  * @typedef {import('../src/adapters/bidderFactory.js').BidRequest} BidRequest
  * @typedef {import('../src/adapters/bidderFactory.js').validBidRequests} validBidRequests
+ * @typedef {BidRequest & { timeout: number }} TimedOutBid A bid request that exceeded the auction timeout.
  */
 
 const ENDPOINT = 'https://onetag-sys.com/prebid-request';
 const USER_SYNC_ENDPOINT = 'https://onetag-sys.com/usync/';
+const TIMEOUT_ENDPOINT = 'https://onetag-sys.com/ptimeout';
 const BIDDER_CODE = 'onetag';
 const GVLID = 241;
 const NATIVE_SUFFIX = 'Ad';
@@ -56,9 +58,8 @@ export function isValid(type, bid) {
   } else if (type === NATIVE) {
     if (typeof bid.mediaTypes.native !== 'object' || bid.mediaTypes.native === null) return false;
     if (!isNativeOrtbVersion(bid)) {
-      if (bid.nativeParams === undefined) return false;
-      const ortbConversion = toOrtbNativeRequest(bid.nativeParams);
-      return ortbConversion && ortbConversion.assets && Array.isArray(ortbConversion.assets) && ortbConversion.assets.length > 0 && ortbConversion.assets.every(asset => isValidAsset(asset));
+      const assets = bid.nativeOrtbRequest?.assets;
+      return Array.isArray(assets) && assets.length > 0 && assets.every(asset => isValidAsset(asset));
     }
 
     let isValidAssets = false;
@@ -130,6 +131,12 @@ function buildRequests(validBidRequests, bidderRequest) {
   }
   if (bidderRequest && bidderRequest.ortb2) {
     payload.ortb2 = bidderRequest.ortb2;
+  }
+  const tmax = parseInt(bidderRequest && bidderRequest.timeout, 10);
+  if (!isNaN(tmax)) {
+    // Mirror core's ORTB converter: the auction timeout wins over any publisher-set
+    // `ortb2.tmax`. Shallow-copy first, `bidderRequest.ortb2` is shared with every bid.
+    payload.ortb2 = { ...payload.ortb2, tmax };
   }
   if (validBidRequests && validBidRequests.length !== 0 && validBidRequests[0].userIdAsEids) {
     payload.userId = validBidRequests[0].userIdAsEids;
@@ -288,12 +295,12 @@ function getPageInfo(bidderRequest) {
     xOffset: topmostFrame.pageXOffset,
     yOffset: topmostFrame.pageYOffset,
     docHidden: getDocumentVisibility(topmostFrame),
-    docHeight: topmostFrame.document.body ? topmostFrame.document.body.scrollHeight : null,
+    docHeight: topmostFrame.document.body ? getWinDimensions(topmostFrame).document.body.scrollHeight : null,
     hLength: history.length,
     timing: getTiming(),
     version: {
       prebid: '$prebid.version$',
-      adapter: '1.1.8'
+      adapter: '1.1.9'
     }
   };
 }
@@ -329,10 +336,9 @@ function requestsToBids(bidRequests) {
     nativeObj['type'] = NATIVE + NATIVE_SUFFIX;
     nativeObj['mediaTypeInfo'] = deepClone(bidRequest.mediaTypes.native);
     if (!isNativeOrtbVersion(bidRequest)) {
-      const ortbConversion = toOrtbNativeRequest(bidRequest.nativeParams);
       nativeObj['mediaTypeInfo'] = {};
       nativeObj['mediaTypeInfo'].adTemplate = bidRequest.nativeParams.adTemplate;
-      nativeObj['mediaTypeInfo'].ortb = ortbConversion;
+      nativeObj['mediaTypeInfo'].ortb = bidRequest.nativeOrtbRequest;
     }
     nativeObj['priceFloors'] = getBidFloor(bidRequest, NATIVE, nativeObj['sizes']);
     return nativeObj;
@@ -501,6 +507,33 @@ export function isSchainValid(schain) {
   return isValid;
 }
 
+/**
+ * Notifies the OneTag server that one or more of our bids timed out.
+ * @param {Array<TimedOutBid>} timeoutData One entry per timed-out bid.
+ */
+function onTimeout(timeoutData) {
+  if (!Array.isArray(timeoutData) || timeoutData.length === 0) {
+    return;
+  }
+  const onetagTimeouts = timeoutData.filter(bid => bid && bid.bidder === BIDDER_CODE);
+  if (onetagTimeouts.length === 0) {
+    return;
+  }
+  dep.ajax(TIMEOUT_ENDPOINT, null, JSON.stringify(onetagTimeouts), {
+    method: 'POST',
+    contentType: 'text/plain',
+    keepalive: true,
+    withCredentials: false
+  });
+}
+
+// Container for the external dependencies used internally by the adapter.
+// Kept separate from `spec` (the interface exposed to Prebid) so these
+// dependencies can be stubbed in unit tests through a mutable reference.
+export const dep = {
+  ajax
+};
+
 export const spec = {
   code: BIDDER_CODE,
   gvlid: GVLID,
@@ -508,8 +541,8 @@ export const spec = {
   isBidRequestValid: isBidRequestValid,
   buildRequests: buildRequests,
   interpretResponse: interpretResponse,
-  getUserSyncs: getUserSyncs
-
+  getUserSyncs: getUserSyncs,
+  onTimeout: onTimeout
 };
 
 registerBidder(spec);

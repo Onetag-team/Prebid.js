@@ -5,6 +5,7 @@ import type { BidderCode } from "./types/common";
 import type { BidRequest } from "./adapterManager.ts";
 import type { Bid } from "./bidfactory.ts";
 import type { StorageType } from "./storageManager.ts";
+import type { BidderParams } from "./adUnits.ts";
 
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 export interface BidderSettings<B extends BidderCode> {
@@ -40,12 +41,33 @@ export interface BidderSettings<B extends BidderCode> {
    */
   allowedAlternateBidderCodes?: ['*'] | BidderCode[];
   /**
-   * If true (the default), allow the `Sec-Browsing-Topics` header in requests to their exchange.
+   * If true, send bid requests uncompressed even when the adapter asks for `endpointCompression`.
+   * Does not affect Prebid Server; use `s2sConfig.endpointCompression` for that.
+   */
+  disableGzipCompression?: boolean;
+  /**
+   * @deprecated - see
    */
   topicsHeader?: boolean;
 }
 
 export interface BidderScopedSettings<B extends BidderCode> extends BidderSettings<B> {
+  /**
+   * If true, trust the deal metadata (`bid.meta.deal`) of bids from this adapter when ranking them:
+   * their desirability starts from `meta.deal.priorityAdjustedCpm` instead of `cpm`.
+   * Read when the bidder request is made, under the adapter's own code (so it also covers bids the adapter
+   * makes under alternate bidder codes), and only here: it is not available on `standard`.
+   * Bids from Prebid Server use `s2sConfig.allowPriorityBids` instead.
+   */
+  allowPriorityBids?: boolean;
+  /**
+   * A narrower form of `allowZeroCpmBids`: if true, accept house bids from this adapter at CPM 0, without allowing its
+   * other zero-CPM bids. Requires `allowPriorityBids`; a house bid is one with a `meta.deal.priority` above the default
+   * 12 (`meta.deal.type` is not considered, since any bidder could declare a house deal). Has no effect when `allowZeroCpmBids` is set, since that already allows every zero-CPM bid.
+   * Read under the adapter's own code and not available on `standard`, like `allowPriorityBids`; unlike it, this also
+   * applies to bids from Prebid Server, as `allowZeroCpmBids` does (they still need `s2sConfig.allowPriorityBids`).
+   */
+  allowHouseBids?: boolean;
   /**
    * Custom CPM adjustment function. Could, for example, adjust a bidder’s gross-price bid to net price.
    */
@@ -63,6 +85,23 @@ export interface BidderScopedSettings<B extends BidderCode> extends BidderSettin
     val(bid: Bid, bidRequest: BidRequest<B>): string;
   })[];
 }
+
+type BivariantCallback<T> = T extends (...args: infer A) => infer R ? { callback(...args: A): R }['callback'] : T;
+
+// The open index must also accept callbacks for specific bidders. Keep this relaxation on the
+// index alone; named bidders and explicit BidderScopedSettings retain their strict callback types.
+type OpenBidderSettings = {
+  [K in keyof BidderScopedSettings<BidderCode>]: BivariantCallback<BidderScopedSettings<BidderCode>[K]>
+};
+
+/** Known bidders receive their own request types; custom bidders retain an open params object. */
+export type BidderSettingsMap = {
+  standard?: BidderSettings<BidderCode>
+} & {
+  [bidder: BidderCode]: OpenBidderSettings | undefined
+} & {
+  [B in keyof BidderParams]?: BidderScopedSettings<B>
+};
 
 export class ScopedSettings<SETTINGS extends Record<string, any>, SCOPED extends SETTINGS> {
   getSettings;

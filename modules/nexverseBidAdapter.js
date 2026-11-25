@@ -12,6 +12,7 @@ import { getAdUnitElement } from '../src/utils/adUnits.js';
 import { getDNT } from '../libraries/dnt/index.js';
 
 const BIDDER_CODE = 'nexverse';
+const GVLID = 1665;
 const BIDDER_ENDPOINT = 'https://rtb.nexverse.ai';
 const SUPPORTED_MEDIA_TYPES = [BANNER, VIDEO, NATIVE];
 const DEFAULT_CURRENCY = 'USD';
@@ -22,6 +23,7 @@ export const storage = getStorageManager({ moduleType: MODULE_TYPE_UID, moduleNa
 
 export const spec = {
   code: BIDDER_CODE,
+  gvlid: GVLID,
   supportedMediaTypes: SUPPORTED_MEDIA_TYPES,
   isBidRequestValid,
   /**
@@ -139,7 +141,7 @@ export const spec = {
    * @param {Object} gppConsent - GPP consent details.
    * @returns {Array} List of user sync URLs.
    */
-  getUserSyncs: (syncOptions, serverResponses, gdprConsent, uspConsent, gppConsent) => {
+  getUserSyncs: (syncOptions, serverResponses, gdprConsent, uspConsent, gppConsent, coppa) => {
     const type = syncOptions.iframeEnabled ? "iframe" : "image";
     let url = BIDDER_ENDPOINT + `/${type}?pbjs=1`;
 
@@ -162,8 +164,7 @@ export const spec = {
       url += "&gpp_sid=" + gppConsent.applicableSections.join(",");
     }
 
-    const coppa = config.getConfig("coppa") ? 1 : 0;
-    url += `&coppa=${coppa}`;
+    url += `&coppa=${coppa ? 1 : 0}`;
 
     url += `&uid=${getUid(storage)}`;
 

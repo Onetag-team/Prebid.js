@@ -6,6 +6,7 @@ import iiqAnalyticsAnalyticsAdapter, {
 } from "modules/intentIqAnalyticsAdapter.js";
 import * as utils from "src/utils.js";
 import { server } from "test/mocks/xhr.js";
+import { mockGptSlot } from "test/mocks/gpt.js";
 import { config } from "src/config.js";
 import { EVENTS } from "src/constants.js";
 import * as events from "src/events.js";
@@ -257,8 +258,9 @@ describe("IntentIQ tests all", function () {
   it("IIQ Analytical Adapter bid win report", function () {
     getWindowLocationStub = sinon
       .stub(utils, "getWindowLocation")
-      .returns({ href: "http://localhost:9876" });
-    const expectedVrref = getWindowLocationStub().href;
+      .returns({ href: "http://example.com" });
+    // the test runs in a frame, so vrref is the top page's URL (getCurrentUrl), not the stubbed location
+    const expectedVrref = window.top.location.origin;
     events.emit(EVENTS.BID_WON, getWonRequest());
 
     expect(server.requests.length).to.be.above(0);
@@ -281,7 +283,7 @@ describe("IntentIQ tests all", function () {
   it("should include adType in payload when present in BID_WON event", function () {
     getWindowLocationStub = sinon
       .stub(utils, "getWindowLocation")
-      .returns({ href: "http://localhost:9876/" });
+      .returns({ href: "http://example.com/" });
     const bidWonEvent = { ...getWonRequest(), mediaType: "video" };
 
     events.emit(EVENTS.BID_WON, bidWonEvent);
@@ -299,7 +301,7 @@ describe("IntentIQ tests all", function () {
     enableAnalyticWithSpecialOptions({ manualWinReportEnabled: true });
     getWindowLocationStub = sinon
       .stub(utils, "getWindowLocation")
-      .returns({ href: "http://localhost:9876/" });
+      .returns({ href: "http://example.com/" });
     const externalWinEvent = { cpm: 1, currency: "USD", adType: "banner" };
 
     events.emit(EVENTS.BID_REQUESTED);
@@ -376,7 +378,7 @@ describe("IntentIQ tests all", function () {
       group: "B",
     };
 
-    const expectedVrref = encodeURIComponent("http://localhost:9876/");
+    const expectedVrref = encodeURIComponent(`${window.top.location.origin}/`);
 
     events.emit(EVENTS.BID_WON, getWonRequest());
 
@@ -431,7 +433,7 @@ describe("IntentIQ tests all", function () {
 
     getWindowLocationStub = sinon
       .stub(utils, "getWindowLocation")
-      .returns({ href: "http://localhost:9876/" });
+      .returns({ href: "http://example.com/" });
 
     events.emit(EVENTS.BID_WON, getWonRequest());
 
@@ -464,7 +466,7 @@ describe("IntentIQ tests all", function () {
 
     getWindowLocationStub = sinon
       .stub(utils, "getWindowLocation")
-      .returns({ href: "http://localhost:9876/" });
+      .returns({ href: "http://example.com/" });
 
     events.emit(EVENTS.BID_WON, getWonRequest());
 
@@ -531,10 +533,10 @@ describe("IntentIQ tests all", function () {
     getWindowTopStub = sinon.stub(utils, "getWindowTop").returns(window);
     getWindowLocationStub = sinon
       .stub(utils, "getWindowLocation")
-      .returns({ href: "http://localhost:9876/" });
+      .returns({ href: "http://example.com/" });
 
     const referrer = getCurrentUrl();
-    expect(referrer).to.equal("http://localhost:9876/");
+    expect(referrer).to.equal("http://example.com/");
   });
 
   it("should return window.top.location.href when window.self !== window.top and access is successful", function () {
@@ -595,7 +597,7 @@ describe("IntentIQ tests all", function () {
     );
     expect(request.url).to.contain(`&jsver=${version}`);
     expect(request.url).to.contain(
-      `&vrref=${encodeURIComponent("http://localhost:9876/")}`
+      `&vrref=${encodeURIComponent(`${window.top.location.origin}/`)}`
     );
     expect(request.url).to.contain("&payload=");
     expect(request.url).to.contain(
@@ -702,7 +704,7 @@ describe("IntentIQ tests all", function () {
 
     getWindowLocationStub = sinon
       .stub(utils, "getWindowLocation")
-      .returns({ href: "http://localhost:9876/" });
+      .returns({ href: "http://example.com/" });
 
     events.emit(EVENTS.BID_WON, getWonRequest());
 
@@ -719,7 +721,7 @@ describe("IntentIQ tests all", function () {
 
     getWindowLocationStub = sinon
       .stub(utils, "getWindowLocation")
-      .returns({ href: "http://localhost:9876/" });
+      .returns({ href: "http://example.com/" });
 
     events.emit(EVENTS.BID_WON, getWonRequest());
 
@@ -783,13 +785,13 @@ describe("IntentIQ tests all", function () {
       gam.cmd.forEach((fn) => fn());
 
       // simulate slotRenderEnded
-      const slot = {
-        getSlotElementId: () => "ad-unit-1",
-        getAdUnitPath: () => "/123/foo",
-        getTargetingKeys: () => ["hb_bidder", "hb_adid"],
-        getTargeting: (k) =>
-          k === "hb_bidder" ? ["pubmatic"] : k === "hb_adid" ? ["ad123"] : [],
-      };
+      const slot = mockGptSlot(
+        { hb_bidder: "pubmatic", hb_adid: "ad123" },
+        {
+          getSlotElementId: () => "ad-unit-1",
+          getAdUnitPath: () => "/123/foo",
+        }
+      );
       if (gam._listeners["slotRenderEnded"]) {
         gam._listeners["slotRenderEnded"]({ isEmpty: false, slot });
       }
@@ -816,13 +818,13 @@ describe("IntentIQ tests all", function () {
       events.emit(EVENTS.BID_REQUESTED);
       gam.cmd.forEach((fn) => fn());
 
-      const slot = {
-        getSlotElementId: () => "ad-unit-1",
-        getAdUnitPath: () => "/123/foo",
-        getTargetingKeys: () => ["hb_bidder", "hb_adid"],
-        getTargeting: (k) =>
-          k === "hb_bidder" ? ["pubmatic"] : k === "hb_adid" ? ["ad123"] : [],
-      };
+      const slot = mockGptSlot(
+        { hb_bidder: "pubmatic", hb_adid: "ad123" },
+        {
+          getSlotElementId: () => "ad-unit-1",
+          getAdUnitPath: () => "/123/foo",
+        }
+      );
 
       const initialRequests = server.requests.length;
       if (gam._listeners["slotRenderEnded"]) {
